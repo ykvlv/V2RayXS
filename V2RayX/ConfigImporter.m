@@ -32,6 +32,12 @@
     }
 }
 
+// Hardcoded device id for remnawave-style HWID device limit.
+// Fixed value: stable across reinstalls / prefs resets, no state to manage.
++ (NSString*)deviceHWID {
+    return @"742F49DE-966C-4A87-9202-CB691055BDD7";
+}
+
 + (NSDictionary*)parseLegacySSLink:(NSString*)link {
     //http://shadowsocks.org/en/config/quick-guide.html
     @try {
@@ -301,9 +307,35 @@
         return nil;
     }
     NSURL *url = [NSURL URLWithString:httpLink];
-    NSError *urlError = nil;
-    NSString *urlStr = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:&urlError];
-    if (!urlError) {
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
+                                                      cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                  timeoutInterval:30];
+    NSString *appVer = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.6.2";
+    // Neutral UA on purpose: remnawave returns the base64 share-link list for it.
+    // Mimicking Happ/v2rayNG would make the panel return a JSON config this app can't parse.
+    [req setValue:[NSString stringWithFormat:@"V2RayXS/%@", appVer] forHTTPHeaderField:@"User-Agent"];
+    // x-hwid is what makes remnawave (HWID device limit) serve the real servers
+    // instead of the "device not supported" placeholder.
+    [req setValue:[ConfigImporter deviceHWID] forHTTPHeaderField:@"x-hwid"];
+    [req setValue:@"macOS" forHTTPHeaderField:@"x-device-os"];
+    [req setValue:[[NSProcessInfo processInfo] operatingSystemVersionString] forHTTPHeaderField:@"x-ver-os"];
+    [req setValue:@"Mac" forHTTPHeaderField:@"x-device-model"];
+
+    __block NSString *urlStr = nil;
+    __block NSError *urlError = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+            completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+        if (error) {
+            urlError = error;
+        } else {
+            urlStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        }
+        dispatch_semaphore_signal(sem);
+    }];
+    [task resume];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    if (!urlError && urlStr) {
         NSString *decodedDataStr = [ConfigImporter decodeBase64String:urlStr];
         if ([decodedDataStr length] == 0) {
             decodedDataStr = urlStr;
