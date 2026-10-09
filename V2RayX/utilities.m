@@ -76,18 +76,6 @@ NSMutableDictionary* normalizedStreamSettingsForXray(NSDictionary* streamSetting
 NSMutableDictionary* normalizedStreamSettingsForXrayForCore(NSDictionary* streamSettings, BOOL rejectsTLSAllowInsecure) {
     NSMutableDictionary* normalized = normalizedStreamSettingsForXray(streamSettings);
 
-    // xray 26.3.27+ removed the legacy mKCP "header" & "seed" fields (migrated to
-    // finalmask/udp header-* & mkcp-original/mkcp-aes128gcm). The app always emits a
-    // kcpSettings block for every outbound, so leaving these in makes the core reject
-    // the ENTIRE config (exit 23) even for non-kcp servers. Strip them before xray sees it.
-    NSMutableDictionary* kcpSettings = [normalized[@"kcpSettings"] isKindOfClass:[NSDictionary class]] ? [normalized[@"kcpSettings"] mutableDeepCopy] : nil;
-    if (kcpSettings != nil) {
-        [kcpSettings removeObjectForKey:@"header"];
-        [kcpSettings removeObjectForKey:@"headerConfig"];
-        [kcpSettings removeObjectForKey:@"seed"];
-        normalized[@"kcpSettings"] = kcpSettings;
-    }
-
     NSArray* tlsSettingNames = @[@"tlsSettings", @"xtlsSettings"];
     for (NSString* settingName in tlsSettingNames) {
         NSMutableDictionary* tlsSettings = [normalized[settingName] isKindOfClass:[NSDictionary class]] ? [normalized[settingName] mutableDeepCopy] : nil;

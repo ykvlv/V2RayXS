@@ -4,6 +4,8 @@
 ![GitHub release](https://img.shields.io/github/downloads/tzmax/V2RayXS/total)
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/tzmax/V2RayXS/build-actions.yml)](https://github.com/tzmax/V2RayXS/actions/workflows/build-actions.yml)
 
+Fork-specific changes: [FORK.md](FORK.md).
+
 **Attention**: If you want to use v2ray-core version please install the original project. <https://github.com/Cenmrev/V2RayX>
 
 > This repo is based on the [Cenmrev/V2RayX](https://github.com/Cenmrev/V2RayX) project for maintenance and update, uses the [Xray-core](https://github.com/XTLS/Xray-core) implementation to support the VLESS and XTLS protocol, and the copyright of the application belongs to the original author [@Contents](https://github.com/Cenmrev). Pay tribute to [@Contents](https://github.com/Cenmrev), Thanks to the [@XTLS](https://github.com/XTLS) community and all contributors

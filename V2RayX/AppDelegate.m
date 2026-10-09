@@ -118,9 +118,10 @@ typedef struct {
 - (NSData*)runtimeCoreConfigData;
 - (NSData*)displayConfigData;
 - (NSDictionary*)managedRuntimeConfigObject;
+- (BOOL)currentCoreRejectsLegacyKCP;
 - (BOOL)isManagedProfileOutbound:(NSDictionary*)outbound;
-- (NSMutableDictionary*)runtimeOutboundFromStoredOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure;
-- (NSMutableDictionary*)runtimeManagedProfileOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure;
+- (NSMutableDictionary*)runtimeOutboundFromStoredOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure rejectsLegacyKCP:(BOOL)rejectsLegacyKCP;
+- (NSMutableDictionary*)runtimeManagedProfileOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure rejectsLegacyKCP:(BOOL)rejectsLegacyKCP;
 - (TLSCertSha256Endpoint*)tlsCertSha256EndpointForOutbound:(NSDictionary*)outbound settingName:(NSString*)settingName tlsSettings:(NSDictionary*)tlsSettings;
 - (NSMutableDictionary*)runtimeTLSSettingsFromStoredTLSSettings:(NSDictionary*)tlsSettings outbound:(NSDictionary*)outbound settingName:(NSString*)settingName rejectsAllowInsecure:(BOOL)rejectsAllowInsecure;
 - (void)appendRuntimeTLSWarning:(NSString*)message;
@@ -135,6 +136,9 @@ static BOOL helperTunSessionActive = NO;
 static NSDictionary* helperTunSessionStatus = nil;
 static NSString* const kMinimumSupportedXrayTunVersion = @"26.1.23";
 static NSString* const kMinimumRemovedTLSAllowInsecureVersion = @"26.3.27";
+// Xray 26.2.6 rejects legacy mKCP header/seed whenever present, even an empty seed.
+// https://github.com/XTLS/Xray-core/blob/v26.2.6/infra/conf/transport_internet.go#L105-L107
+static NSString* const kMinimumRemovedLegacyKCPVersion = @"26.2.6";
 static int const kXrayTunFDTarget = 3;
 
 static NSString* const kStoredTunLeaseIdKey = @"xrayTunLeaseId";
@@ -1744,15 +1748,15 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 - (void)saveAppStatus {
     NSDictionary* status = @{
-                             @"proxyState": @(proxyState),
-                             @"proxyMode": @(proxyMode),
-                             @"selectedServerIndex": @(selectedServerIndex),
-                             @"selectedCusServerIndex": @(selectedCusServerIndex),
-                             @"useCusProfile": @(useCusProfile),
-                             @"selectedRoutingSet":@(_selectedRoutingSet),
-                             @"useMultipleServer": @(useMultipleServer),
-                             @"selectedPacFileName": selectedPacFileName
-                             };
+                              @"proxyState": @(proxyState),
+                              @"proxyMode": @(proxyMode),
+                              @"selectedServerIndex": @(selectedServerIndex),
+                              @"selectedCusServerIndex": @(selectedCusServerIndex),
+                              @"useCusProfile": @(useCusProfile),
+                              @"selectedRoutingSet":@(_selectedRoutingSet),
+                              @"useMultipleServer": @(useMultipleServer),
+                              @"selectedPacFileName": selectedPacFileName ?: @"pac.js"
+                              };
     [[NSUserDefaults standardUserDefaults] setObject:status forKey:@"appStatus"];
 }
 
@@ -1989,12 +1993,24 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 - (void)normalizeCurrentRuntimeSelections {
     NSUInteger outboundCount = profiles.count + customOutbounds.count + _subsOutbounds.count;
-    selectedServerIndex = MIN((NSInteger)outboundCount - 1, selectedServerIndex);
     if (outboundCount > 0) {
+        selectedServerIndex = MIN((NSInteger)outboundCount - 1, selectedServerIndex);
         selectedServerIndex = MAX(selectedServerIndex, 0);
+    } else {
+        selectedServerIndex = -1;
     }
-    selectedCusServerIndex = MIN((NSInteger)cusProfiles.count - 1, selectedCusServerIndex);
-    _selectedRoutingSet = MIN((NSInteger)_routingRuleSets.count - 1, _selectedRoutingSet);
+    if (cusProfiles.count > 0) {
+        selectedCusServerIndex = MIN((NSInteger)cusProfiles.count - 1, selectedCusServerIndex);
+        selectedCusServerIndex = MAX(selectedCusServerIndex, -1);
+    } else {
+        selectedCusServerIndex = -1;
+    }
+    if (_routingRuleSets.count > 0) {
+        _selectedRoutingSet = MIN((NSInteger)_routingRuleSets.count - 1, _selectedRoutingSet);
+        _selectedRoutingSet = MAX(_selectedRoutingSet, 0);
+    } else {
+        _selectedRoutingSet = 0;
+    }
 
     if ((!useMultipleServer && selectedServerIndex == -1 && selectedCusServerIndex == -1) || (useMultipleServer && outboundCount < 1)) {
         proxyState = false;
@@ -2236,10 +2252,12 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 - (IBAction)didChangeStatus:(id)sender {
     [self applyStatusChangeFromSender:sender startupRestore:NO];
+    [self saveAppStatus];
 }
 
 - (IBAction)didChangeMode:(id)sender {
     [self applyModeChangeFromSender:sender userInitiated:YES];
+    [self saveAppStatus];
 }
 
 - (void)updateMenus {
@@ -2528,6 +2546,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 -(IBAction)switchRoutingSet:(id)sender {
     _selectedRoutingSet = [sender tag];
     [self coreConfigDidChange:self];
+    [self saveAppStatus];
 }
 
 - (void)switchServer:(id)sender {
@@ -2546,6 +2565,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     }
     NSLog(@"use cus pro:%hhd, select %ld, select cus %ld", useCusProfile, (long)selectedServerIndex, selectedCusServerIndex);
     [self coreConfigDidChange:self];
+    [self saveAppStatus];
 }
 
 -(void)unloadV2ray {
@@ -2684,6 +2704,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         }
     }
     BOOL rejectsTLSAllowInsecure = [self currentCoreRejectsTLSAllowInsecure];
+    BOOL rejectsLegacyKCP = [self currentCoreRejectsLegacyKCP];
     if (usebalance) {
         // if balancer is used, add all outbounds into config file, and add all tags to the balancer selector
         fullConfig[@"routing"][@"balancers"] = @[@{
@@ -2692,16 +2713,30 @@ static int normalizedExitCodeFromWaitStatus(int status) {
                                                      }];
         NSMutableArray* normalizedOutbounds = [[NSMutableArray alloc] init];
         for (NSDictionary* outbound in allUniqueTagOutboundDict.allValues) {
-            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:outbound rejectsAllowInsecure:rejectsTLSAllowInsecure];
+            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:outbound rejectsAllowInsecure:rejectsTLSAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP];
             [normalizedOutbounds addObject:normalizedOutbound];
         }
         fullConfig[@"outbounds"] = normalizedOutbounds;
     } else {
-        // otherwise, we convert all collected outbounds into an array
+        // A catch-all last rule always matches, so IPIfNonMatch would never resolve
+        // domains for ip rules. Drop it and make its outbound the first one, which
+        // Xray uses for traffic that matches no rule.
+        NSMutableArray* rules = fullConfig[@"routing"][@"rules"];
+        NSDictionary* lastRule = rules.lastObject;
+        NSString* defaultTag = nil;
+        NSSet* catchAllKeys = [NSSet setWithArray:@[@"type", @"port", @"outboundTag"]];
+        if ([@"0-65535" isEqualToString:lastRule[@"port"]] && configOutboundDict[lastRule[@"outboundTag"]] && [[NSSet setWithArray:lastRule.allKeys] isSubsetOfSet:catchAllKeys]) {
+            defaultTag = lastRule[@"outboundTag"];
+            [rules removeLastObject];
+        }
         NSMutableArray* normalizedOutbounds = [[NSMutableArray alloc] init];
-        for (NSDictionary* outbound in configOutboundDict.allValues) {
-            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:outbound rejectsAllowInsecure:rejectsTLSAllowInsecure];
-            [normalizedOutbounds addObject:normalizedOutbound];
+        for (NSString* tag in configOutboundDict) {
+            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:configOutboundDict[tag] rejectsAllowInsecure:rejectsTLSAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP];
+            if ([tag isEqualToString:defaultTag]) {
+                [normalizedOutbounds insertObject:normalizedOutbound atIndex:0];
+            } else {
+                [normalizedOutbounds addObject:normalizedOutbound];
+            }
         }
         fullConfig[@"outbounds"] = normalizedOutbounds;
     }
@@ -2813,6 +2848,17 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     return [detectedVersion compare:kMinimumRemovedTLSAllowInsecureVersion options:NSNumericSearch] != NSOrderedAscending;
 }
 
+- (BOOL)currentCoreRejectsLegacyKCP {
+    if (![self isCurrentCoreXray]) {
+        return NO;
+    }
+    NSString* detectedVersion = [self currentCoreSemanticVersion];
+    if (detectedVersion.length == 0) {
+        return YES;
+    }
+    return [detectedVersion compare:kMinimumRemovedLegacyKCPVersion options:NSNumericSearch] != NSOrderedAscending;
+}
+
 - (BOOL)isManagedProfileOutbound:(NSDictionary*)outbound {
     if (![outbound isKindOfClass:[NSDictionary class]]) {
         return NO;
@@ -2832,14 +2878,14 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     return [ServerProfile profilesFromJson:outbound].count > 0;
 }
 
-- (NSMutableDictionary*)runtimeOutboundFromStoredOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure {
+- (NSMutableDictionary*)runtimeOutboundFromStoredOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure rejectsLegacyKCP:(BOOL)rejectsLegacyKCP {
     if ([self isManagedProfileOutbound:outbound]) {
-        return [self runtimeManagedProfileOutbound:outbound rejectsAllowInsecure:rejectsAllowInsecure];
+        return [self runtimeManagedProfileOutbound:outbound rejectsAllowInsecure:rejectsAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP];
     }
     return [outbound mutableDeepCopy];
 }
 
-- (NSMutableDictionary*)runtimeManagedProfileOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure {
+- (NSMutableDictionary*)runtimeManagedProfileOutbound:(NSDictionary*)outbound rejectsAllowInsecure:(BOOL)rejectsAllowInsecure rejectsLegacyKCP:(BOOL)rejectsLegacyKCP {
     NSMutableDictionary* runtimeOutbound = [outbound mutableDeepCopy];
     NSMutableDictionary* streamSettings = [runtimeOutbound[@"streamSettings"] isKindOfClass:[NSDictionary class]] ? [runtimeOutbound[@"streamSettings"] mutableDeepCopy] : nil;
     if (streamSettings == nil) {
@@ -2853,7 +2899,28 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         NSDictionary* storedTLSSettings = [streamSettings[@"xtlsSettings"] isKindOfClass:[NSDictionary class]] ? streamSettings[@"xtlsSettings"] : @{};
         streamSettings[@"xtlsSettings"] = [self runtimeTLSSettingsFromStoredTLSSettings:storedTLSSettings outbound:runtimeOutbound settingName:@"xtlsSettings" rejectsAllowInsecure:rejectsAllowInsecure];
     }
-    runtimeOutbound[@"streamSettings"] = normalizedStreamSettingsForXrayForCore(streamSettings, rejectsAllowInsecure);
+    NSMutableDictionary* normalizedStreamSettings = normalizedStreamSettingsForXrayForCore(streamSettings, rejectsAllowInsecure);
+    if (rejectsLegacyKCP) {
+        // Remove the legacy block inherited from the profile template, even for other transports.
+        NSMutableDictionary* kcpSettings = [normalizedStreamSettings[@"kcpSettings"] isKindOfClass:[NSDictionary class]] ? [normalizedStreamSettings[@"kcpSettings"] mutableDeepCopy] : nil;
+        if (kcpSettings != nil) {
+            [kcpSettings removeObjectForKey:@"header"];
+            [kcpSettings removeObjectForKey:@"seed"];
+            normalizedStreamSettings[@"kcpSettings"] = kcpSettings;
+        }
+    }
+    NSString* network = [normalizedStreamSettings[@"network"] isKindOfClass:[NSString class]] ? normalizedStreamSettings[@"network"] : @"";
+    if ([network isEqualToString:@"ws"] || [network isEqualToString:@"httpupgrade"]) {
+        // These transports require HTTP/1.1; leave explicit ALPN values intact.
+        for (NSString* tlsSettingName in @[@"tlsSettings", @"xtlsSettings"]) {
+            NSMutableDictionary* tlsSettings = [normalizedStreamSettings[tlsSettingName] isKindOfClass:[NSDictionary class]] ? [normalizedStreamSettings[tlsSettingName] mutableDeepCopy] : nil;
+            if (tlsSettings != nil && tlsSettings[@"alpn"] == nil) {
+                tlsSettings[@"alpn"] = @[@"http/1.1"];
+                normalizedStreamSettings[tlsSettingName] = tlsSettings;
+            }
+        }
+    }
+    runtimeOutbound[@"streamSettings"] = normalizedStreamSettings;
     return runtimeOutbound;
 }
 
