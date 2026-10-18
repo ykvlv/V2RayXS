@@ -31,7 +31,7 @@
 #define OUTBOUND_DIRECT (@{@"protocol":@"freedom",@"tag":@"direct",@"settings":@{}})
 #define OUTBOUND_DECLINE (@{@"protocol":@"blackhole",@"tag":@"decline",@"settings": @{}})
 
-#define RESERVED_TAGS (@[@"main", @"direct", @"decline", @"balance"])
+#define RESERVED_TAGS (@[@"main", @"direct", @"decline"])
 
 #define SUPPORTED_SS_SECURITY (@[@"aes-256-cfb",@"aes-128-cfb",@"chacha20",@"chacha20-ietf",@"aes-256-gcm",@"aes-128-gcm",@"chacha20-poly1305", @"chacha20-ietf-poly1305"])
 

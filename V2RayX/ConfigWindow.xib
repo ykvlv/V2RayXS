@@ -669,26 +669,10 @@ Gw
                         <action selector="importFromJSONFiles:" target="-2" id="bWI-hd-Wef"/>
                     </connections>
                 </menuItem>
-                <menuItem title="Import from standard share links..." id="CTZ-Lq-X8f">
+                <menuItem title="Import from link or subscription URL..." id="CTZ-Lq-X8f">
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <connections>
-                        <action selector="importFromStandardLink:" target="-2" id="prN-IG-Awe"/>
-                    </connections>
-                </menuItem>
-                <menuItem title="Import from pastboard..." hidden="YES" id="EQb-nS-Lf9">
-                    <modifierMask key="keyEquivalentModifierMask"/>
-                </menuItem>
-                <menuItem isSeparatorItem="YES" id="HUE-ih-p3S"/>
-                <menuItem title="Import from VLESS share links…" id="cOh-Xu-igt">
-                    <modifierMask key="keyEquivalentModifierMask"/>
-                    <connections>
-                        <action selector="importFromVLESSLinks:" target="-2" id="0Sp-Zz-nTT"/>
-                    </connections>
-                </menuItem>
-                <menuItem title="Import from other links..." id="8rA-16-mml">
-                    <modifierMask key="keyEquivalentModifierMask"/>
-                    <connections>
-                        <action selector="importFromMiscLinks:" target="-2" id="ZeY-9p-gY8"/>
+                        <action selector="importFromLinks:" target="-2" id="prN-IG-Awe"/>
                     </connections>
                 </menuItem>
             </items>

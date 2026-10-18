@@ -1,9 +1,5 @@
 # V2RayXS: A simple GUI for Xray on macOS
 
-[![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/tzmax/V2RayXS)](https://github.com/tzmax/V2RayXS/releases)
-![GitHub release](https://img.shields.io/github/downloads/tzmax/V2RayXS/total)
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/tzmax/V2RayXS/build-actions.yml)](https://github.com/tzmax/V2RayXS/actions/workflows/build-actions.yml)
-
 Fork-specific changes: [FORK.md](FORK.md).
 
 **Attention**: If you want to use v2ray-core version please install the original project. <https://github.com/Cenmrev/V2RayX>
@@ -22,7 +18,7 @@ Fork-specific changes: [FORK.md](FORK.md).
 
 First of all, please note that this function is an experimental function and is still under development and design. Due to the particularity of the tun mode, I hope you can use it after fully understanding it.
 
-This mode adopts the tun2socks method to forward all traffic, realizes the creation of a utun virtual network card device, and transmits the traffic of the tun device to your server through the socks5 proxy, and then the application sets up the routing table, and sets the default gateway to this tun device (please Note that this step may cause the default gateway routing settings of your device to be damaged. Although I have done a backup and repair process in the application, I cannot guarantee that it will be effective on all devices, please use it with caution!)
+This mode adopts the tun2socks method to forward all traffic, realizes the creation of a utun virtual network card device, and transmits the traffic of the tun device to your server through the socks5 proxy, and then the application routes all IPv4 traffic to this tun device without replacing the default route.
 
 Finally, if you are interested in this technology, you can also try to contact me or submit a PR to help me improve this function. If you can recommend this software to friends or post a blog and be able to link this project in other post replies, I will Very happy 😋, thank you for your attention and contribution (Welcome to contribute documents in other languages)
 
@@ -60,19 +56,15 @@ A: The name of the tun device on macos will be determined by the system, but the
 
 for more questions, you can also check issues first, and submit issues if you do not find a solution.
 
-## Download V2RayXS
-
-Download from [Releases](https://github.com/tzmax/V2RayXS/releases).
-
 ## How to build
 
 V2RayXS.app is built by running one of the following commands in your terminal. You can install this via the command-line with curl.
 
-`sh -c "$(curl -fsSL https://raw.githubusercontent.com/tzmax/V2RayXS/master/compilefromsource.sh)"`
+`sh -c "$(curl -fsSL https://raw.githubusercontent.com/ykvlv/V2RayXS/master/compilefromsource.sh)"`
 
 or step by step:
 
-`git clone --recursive https://github.com/tzmax/V2RayXS.git`
+`git clone --recursive https://github.com/ykvlv/V2RayXS.git`
 
 open V2RayXS.xcodeproj and use Xcode to build V2RayXS.
 
@@ -89,7 +81,7 @@ V2RayXS provide three modes:
 -   Global Mode: V2RayXS asks macOS to route all internet traffic to xray core if the network traffic obeys operating system's network rules.
 -   PAC Mode: macOS will determine the routing based on a pac file and some traffic may be routed to xray core.
 -   Manual Mode: V2RayXS will not modify any macOS network settings, but only start or stop xray core.
--   Tun Mode (**Experimental**): V2RayXS will create a virtual network card, and then try to set the default gateway to take over and proxy the full traffic of the device.
+-   Tun Mode (**Experimental**): V2RayXS will create a virtual network card, and then route all IPv4 traffic into it without replacing the default gateway.
 
 ### PAC placeholders
 

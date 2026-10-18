@@ -28,6 +28,7 @@
 #import "route_command_service.h"
 #import "route_entry_normalizer.h"
 #import "session_backup_store.h"
+#import "tun_dns.h"
 #import "session_state.h"
 #import "tun_command_service.h"
 #import "tun_session_controller.h"
@@ -48,9 +49,9 @@ static NSString* const UsageLines[] = {
     @"  v2rayx_sysconf daemon run [--debug]",
     @"  v2rayx_sysconf daemon status [--json] [--debug]",
     @"  v2rayx_sysconf daemon stop [--json] [--debug]",
-    @"  v2rayx_sysconf tun start <socksPort> [--json] [--debug]",
+    @"  v2rayx_sysconf tun start <socksPort> [--split-dns <domain,...>] [--json] [--debug]",
     @"  v2rayx_sysconf tun allocate [<utunName>] [--json] [--debug]",
-    @"  v2rayx_sysconf tun activate [<leaseId>] [--json] [--debug]",
+    @"  v2rayx_sysconf tun activate [<leaseId>] [--split-dns <domain,...>] [--json] [--debug]",
     @"  v2rayx_sysconf tun deactivate [--json] [--debug]",
     @"  v2rayx_sysconf tun stop [--json] [--debug]",
     @"  v2rayx_sysconf tun status [--json] [--debug]",
@@ -74,7 +75,6 @@ static NSInteger const EXIT_TUN_FD = 5;
 
 static BOOL runLoopMark = YES;
 static BOOL debugLoggingEnabled = NO;
-static NSString* runtimeMode = @"";
 static SYSRouteHelper* routeHelper;
 static NSString* tunAddr = @"10.0.0.0";
 static NSString* tunWg = @"10.0.0.1";
@@ -105,8 +105,8 @@ static NSDictionary* routeListPayload(void);
 static NSDictionary* tunDiagnosePayload(NSDictionary* statusPayload);
 static NSDictionary* requestActiveSession(NSDictionary* request);
 static NSDictionary* stopTunSession(void);
-static BOOL setupTunSession(int localProxyPort, NSString** errorMessage);
-static BOOL activateAllocatedTunLease(NSString* tunName, NSString** errorMessage, NSDictionary** diagnosticsOut);
+static BOOL setupTunSession(int localProxyPort, NSArray<NSString*>* serverDomains, NSString** errorMessage);
+static BOOL activateAllocatedTunLease(NSString* tunName, NSArray<NSString*>* serverDomains, NSString** errorMessage, NSDictionary** diagnosticsOut);
 static NSDictionary* errorPayload(NSString* code, NSString* stage, NSDictionary* diagnostics);
 static NSDictionary* processServerRequest(NSDictionary* request, int* responseFDOut);
 static void updateRouteBackupState(NSMutableDictionary* backup, NSString* state, NSString* lastError);
@@ -255,12 +255,25 @@ static BOOL loadDefaultRouteBaselineBridge(NSString** errorMessage) {
     return helperRuntimeLoadDefaultRouteBaseline(runtimeContext, errorMessage);
 }
 
-static BOOL installIPv4TakeoverRoutesBridge(NSString* tunName, NSMutableDictionary* backup, NSString** errorMessage) {
-    return helperRuntimeInstallIPv4TakeoverRoutes(runtimeContext, tunName, backup, errorMessage);
-}
-
 static BOOL removeIPv4TakeoverRoutesBridge(NSString* tunName, NSString** errorMessage) {
     return helperRuntimeRemoveIPv4TakeoverRoutes(runtimeContext, tunName, errorMessage);
+}
+
+// Whitelist routes first, then the takeover routes; on failure both are rolled back.
+static BOOL activateTunRoutesBridge(NSString* tunName, NSMutableDictionary* backup, NSString** errorMessage) {
+    NSDictionary* response = syncActiveWhitelistWithEntries(storeEntries(), YES, routeHelper, defaultRouteGatewayV4, defaultRouteGatewayV6, defaultRouteInterfaceV4, defaultRouteInterfaceV6, &activeWhitelistRoutes, tunName, ^NSDictionary* (NSString* state, NSString* lastError) {
+        return updateBackupForActiveRoutes(ROUTE_BACKUP_STATE_SWITCHING, lastError);
+    });
+    BOOL whitelistReady = [response[@"ok"] boolValue];
+    if (!whitelistReady && errorMessage) *errorMessage = @"Failed to synchronize whitelist routes before TUN activation.";
+    if (whitelistReady && helperRuntimeInstallIPv4TakeoverRoutes(runtimeContext, tunName, backup, errorMessage)) return YES;
+
+    BOOL routesRemoved = removeIPv4TakeoverRoutesBridge(tunName, nil);
+    NSMutableArray* removed = [NSMutableArray array];
+    NSMutableArray* failed = [NSMutableArray array];
+    BOOL whitelistRemoved = removeWhitelistEntries(activeWhitelistRoutes.allValues, routeHelper, &activeWhitelistRoutes, removed, failed);
+    updateBackupForActiveRoutes(ROUTE_BACKUP_STATE_SWITCHING, routesRemoved && whitelistRemoved ? @"TUN activation rolled back." : @"TUN activation rollback incomplete; route recovery required.");
+    return NO;
 }
 
 static void resetTunRuntimeStateBridge(NSMutableDictionary* routeBackup, NSString* state, NSString* lastError) {
@@ -486,27 +499,31 @@ static NSDictionary* stopTunSession(void) {
     if (!acquireTunSessionLock(&lockError)) {
         return makeResponse(NO, lockError ?: @"Another tun session operation is already in progress.", nil);
     }
-    NSMutableArray* removedEntries = [[NSMutableArray alloc] init];
-    NSMutableArray* failedEntries = [[NSMutableArray alloc] init];
-    if (activeWhitelistRoutes != nil) {
-        removeWhitelistEntries([activeWhitelistRoutes allValues], routeHelper, &activeWhitelistRoutes, removedEntries, failedEntries);
-    }
+    tunDNSRestore(routeHelper);
+    NSMutableArray* removedEntries = [NSMutableArray array];
+    NSMutableArray* failedEntries = [NSMutableArray array];
     NSMutableDictionary* backup = loadRouteBackup();
     NSString* routeError = nil;
     BOOL removedTakeover = removeIPv4TakeoverRoutesBridge(activeTunName, &routeError);
-    resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
-    daemonStateReset();
-    BOOL restored = YES;
-    activeTunName = @"";
-    releaseTunSessionLock();
-    if (!removedTakeover && routeError.length > 0) {
-        backup[ROUTE_BACKUP_LAST_ERROR_KEY] = routeError;
-        saveRouteBackup(backup);
+    if (removedTakeover && activeWhitelistRoutes != nil) {
+        removeWhitelistEntries(activeWhitelistRoutes.allValues, routeHelper, &activeWhitelistRoutes, removedEntries, failedEntries);
     }
-    return makeResponse(restored && removedTakeover && failedEntries.count == 0, (restored && removedTakeover) ? @"Tun session stopped." : @"Failed to fully restore tun session.", @{@"removed": removedEntries, @"failed": failedEntries, @"takeoverRemoved": @(removedTakeover)});
+    BOOL restored = removedTakeover && failedEntries.count == 0;
+    if (restored) {
+        resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
+        daemonStateReset();
+    } else {
+        updateRouteBackupState(backup, ROUTE_BACKUP_STATE_SWITCHING, routeError ?: @"Failed to remove whitelist routes; recovery required.");
+    }
+    releaseTunSessionLock();
+    return makeResponse(restored, restored ? @"Tun session stopped." : @"Failed to fully restore tun session.", @{@"removed": removedEntries, @"failed": failedEntries, @"takeoverRemoved": @(removedTakeover)});
 }
 
 static NSDictionary* stopDaemon(void) {
+    // Routes through the tun vanish with it, but those through the physical interface stay unless the session is stopped.
+    if (activeTunName.length > 0) {
+        stopTunSession();
+    }
     if (controlServerSocketFD != -1) {
         close(controlServerSocketFD);
         controlServerSocketFD = -1;
@@ -561,17 +578,10 @@ static NSDictionary* processServerRequest(NSDictionary* request, int* responseFD
     if ([command isEqualToString:@"session.start_embedded"]) {
         NSInteger socksPort = [payload[@"socksPort"] integerValue];
         NSString* errorMessage = nil;
-        if (!setupTunSession((int)socksPort, &errorMessage)) {
+        if (!setupTunSession((int)socksPort, payload[@"serverDomains"], &errorMessage)) {
             return makeResponse(NO, errorMessage ?: @"Failed to start tun session.", nil);
         }
         daemonStateActivateEmbeddedSession(activeTunName, socksPort);
-        NSDictionary* syncResponse = syncActiveWhitelistWithEntries(storeEntries(), YES, routeHelper, defaultRouteGatewayV4, defaultRouteGatewayV6, defaultRouteInterfaceV4, defaultRouteInterfaceV6, &activeWhitelistRoutes, activeTunName, ^NSDictionary* (NSString* state, NSString* lastError) {
-            return updateBackupForActiveRoutes(state, lastError);
-        });
-        if (![syncResponse[@"ok"] boolValue]) {
-            NSMutableDictionary* backup = loadRouteBackup();
-            updateRouteBackupState(backup, ROUTE_BACKUP_STATE_ACTIVE, syncResponse[@"message"] ?: @"whitelist sync failed");
-        }
         return makeResponse(YES, @"Embedded tun session started.", runtimeSessionStatusPayload());
     }
     if ([command isEqualToString:@"session.allocate_fd"]) {
@@ -586,7 +596,7 @@ static NSDictionary* processServerRequest(NSDictionary* request, int* responseFD
             daemonStateRecordLastError(@"tun.lease_missing", @"activate.resolve_pending_lease", errorMessage ?: @"Failed to activate pending tun lease.", nil);
             return makeResponse(NO, errorMessage ?: @"Failed to activate pending tun lease.", errorPayload(@"tun.lease_missing", @"activate.resolve_pending_lease", nil));
         }
-        if (!activateAllocatedTunLease(activatedTunName, &errorMessage, &diagnostics)) {
+        if (!activateAllocatedTunLease(activatedTunName, payload[@"serverDomains"], &errorMessage, &diagnostics)) {
             daemonStateClearLease();
             NSString* code = proxyDiagnosticsIndicatesProxyFailure(diagnostics) ? @"proxy.disable_failed" : @"tun.activate_failed";
             NSString* stage = [code isEqualToString:@"proxy.disable_failed"] ? @"activate.disable_system_proxy" : @"activate.commit";
@@ -711,6 +721,12 @@ static NSDictionary* handleDaemonCommand(NSArray<NSString*>* arguments) {
 }
 
 static NSDictionary* handleTunCleanupCommand(void) {
+    // A live daemon would override a restore done from here again.
+    if (isControlSocketReachable()) {
+        requestDaemonSession(daemonRPCMakeRequest(@"session.stop", @{}), NULL);
+    } else {
+        tunDNSRestore(routeHelper);
+    }
     NSMutableArray<NSString*>* removed = [[NSMutableArray alloc] init];
     NSString* socketPath = helperControlSocketPath();
     NSString* lockPath = helperTunSessionLockPath();
@@ -746,12 +762,20 @@ static NSDictionary* handleTunCommand(NSArray<NSString*>* arguments) {
         }
         return buildTunDiagnosticStatusResponse();
     }
+    NSMutableArray<NSString*>* commandArguments = [arguments mutableCopy];
+    NSArray<NSString*>* serverDomains = @[];
+    NSUInteger splitDNSIndex = [commandArguments indexOfObject:@"--split-dns"];
+    if (splitDNSIndex != NSNotFound && splitDNSIndex + 1 < commandArguments.count) {
+        serverDomains = [commandArguments[splitDNSIndex + 1] componentsSeparatedByString:@","];
+        [commandArguments removeObjectsInRange:NSMakeRange(splitDNSIndex, 2)];
+    }
+    arguments = commandArguments;
     return tunCommandServiceHandle(arguments, ^NSDictionary* (BOOL ok, NSString* message, NSDictionary* payload) {
         return makeResponse(ok, message, payload);
     }, ^NSDictionary* {
         return buildTunDiagnosticStatusResponse();
     }, ^NSDictionary* (int localProxyPort) {
-        return requestDaemonSession(daemonRPCMakeRequest(@"session.start_embedded", @{@"socksPort": @(localProxyPort)}), NULL);
+        return requestDaemonSession(daemonRPCMakeRequest(@"session.start_embedded", @{@"socksPort": @(localProxyPort), @"serverDomains": serverDomains}), NULL);
     }, ^NSDictionary* (NSString* preferredTunName, int* receivedFDOut) {
         NSMutableDictionary* payload = [[NSMutableDictionary alloc] init];
         if (preferredTunName.length > 0) {
@@ -759,17 +783,22 @@ static NSDictionary* handleTunCommand(NSArray<NSString*>* arguments) {
         }
         return requestDaemonSession(daemonRPCMakeRequest(@"session.allocate_fd", payload), receivedFDOut);
     }, ^NSDictionary* (NSString* leaseId) {
-        NSMutableDictionary* payload = [[NSMutableDictionary alloc] init];
+        NSMutableDictionary* payload = [@{@"serverDomains": serverDomains} mutableCopy];
         if (leaseId.length > 0) {
             payload[@"leaseId"] = leaseId;
         }
         return requestDaemonSession(daemonRPCMakeRequest(@"session.activate", payload), NULL);
     }, ^NSDictionary* {
+        if (!isControlSocketReachable()) {
+            // A daemon that died mid-session left its DNS override behind.
+            tunDNSRestore(routeHelper);
+            return makeResponse(YES, @"No tun session; DNS restored.", nil);
+        }
         return requestDaemonSession(daemonRPCMakeRequest(@"session.stop", @{}), NULL);
     });
 }
 
-static BOOL setupTunSession(int localProxyPort, NSString** errorMessage) {
+static BOOL setupTunSession(int localProxyPort, NSArray<NSString*>* serverDomains, NSString** errorMessage) {
     if (!acquireTunSessionLock(errorMessage)) {
         return NO;
     }
@@ -818,8 +847,10 @@ static BOOL setupTunSession(int localProxyPort, NSString** errorMessage) {
         releaseTunSessionLock();
         return NO;
     }
-    if (!installIPv4TakeoverRoutesBridge(activeTunName, backup, errorMessage)) {
-        resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
+    tunDNSApply(serverDomains, routeHelper);
+    if (!activateTunRoutesBridge(activeTunName, backup, errorMessage)) {
+        tunDNSRestore(routeHelper);
+        if (activeIPv4TakeoverRoutes.count == 0 && activeWhitelistRoutes.count == 0) resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
         releaseTunSessionLock();
         return NO;
     }
@@ -831,7 +862,7 @@ static BOOL setupTunSession(int localProxyPort, NSString** errorMessage) {
     return YES;
 }
 
-static BOOL activateAllocatedTunLease(NSString* tunName, NSString** errorMessage, NSDictionary** diagnosticsOut) {
+static BOOL activateAllocatedTunLease(NSString* tunName, NSArray<NSString*>* serverDomains, NSString** errorMessage, NSDictionary** diagnosticsOut) {
     if (!acquireTunSessionLock(errorMessage)) {
         return NO;
     }
@@ -880,9 +911,13 @@ static BOOL activateAllocatedTunLease(NSString* tunName, NSString** errorMessage
         releaseTunSessionLock();
         return NO;
     }
-    if (!installIPv4TakeoverRoutesBridge(activeTunName, backup, errorMessage)) {
-        resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
-        activeTunName = @"";
+    tunDNSApply(serverDomains, routeHelper);
+    if (!activateTunRoutesBridge(activeTunName, backup, errorMessage)) {
+        tunDNSRestore(routeHelper);
+        if (activeIPv4TakeoverRoutes.count == 0 && activeWhitelistRoutes.count == 0) {
+            resetTunRuntimeStateBridge(backup, ROUTE_BACKUP_STATE_IDLE, @"");
+            activeTunName = @"";
+        }
         releaseTunSessionLock();
         return NO;
     }
@@ -891,22 +926,12 @@ static BOOL activateAllocatedTunLease(NSString* tunName, NSString** errorMessage
     backup[ROUTE_BACKUP_SESSION_OWNER_KEY] = SESSION_OWNER_EXTERNAL;
     backup[ROUTE_BACKUP_CONTROL_PLANE_KEY] = CONTROL_PLANE_STATELESS;
     saveRouteBackup(backup);
-    NSDictionary* syncResponse = syncActiveWhitelistWithEntries(storeEntries(), YES, routeHelper, defaultRouteGatewayV4, defaultRouteGatewayV6, defaultRouteInterfaceV4, defaultRouteInterfaceV6, &activeWhitelistRoutes, activeTunName, ^NSDictionary* (NSString* state, NSString* lastError) {
-        return updateBackupForActiveRoutes(state, lastError);
-    });
-    if (![syncResponse[@"ok"] boolValue]) {
-        if (errorMessage != NULL) {
-            *errorMessage = syncResponse[@"message"] ?: @"Failed to synchronize whitelist routes.";
-        }
-        releaseTunSessionLock();
-        return NO;
-    }
     return YES;
 }
 
 static void cleanupHandle(int signal_ns) {
     (void)signal_ns;
-    if ([runtimeMode isEqualToString:@"tun"]) {
+    if (activeTunName.length > 0) {
         stopTunSession();
     }
     if (controlServerSocketFD != -1) {
@@ -993,13 +1018,11 @@ int main(int argc, const char * argv[])
                 }
             }
         } else if ([command isEqualToString:@"daemon"]) {
-            runtimeMode = @"daemon";
             response = handleDaemonCommand(arguments);
             if (![response[@"ok"] boolValue]) {
                 exitCode = EXIT_SOCKET;
             }
         } else if ([command isEqualToString:@"tun"]) {
-            runtimeMode = @"tun";
             response = handleTunCommand(arguments);
             if (![response[@"ok"] boolValue]) {
                 if ([arguments count] > 1 && [arguments[1] isEqualToString:@"allocate"]) {

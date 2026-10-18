@@ -14,6 +14,7 @@
                 <outlet property="configTable" destination="sAX-Hf-7on" id="YHW-T4-U6Z"/>
                 <outlet property="coreFileListField" destination="SbL-wp-TzE" id="O9n-fQ-Coz"/>
                 <outlet property="corePathField" destination="8Y7-Ux-q6J" id="Tnh-t0-6EK"/>
+                <outlet property="geoDataStatusField" destination="gD1-St-aTs" id="gD5-Ou-tLt"/>
                 <outlet property="domainEnableButton" destination="e2v-9w-e45" id="M5I-A3-4JO"/>
                 <outlet property="domainIpHelpButton" destination="mR8-QF-6Vz" id="tgx-nb-fhd"/>
                 <outlet property="domainIpHelpView" destination="o2X-Co-4Uk" id="yJU-k6-UuF"/>
@@ -776,7 +777,7 @@ Gw
                                             <autoresizingMask key="autoresizingMask"/>
                                             <textFieldCell key="cell" id="a4D-MW-Gqf">
                                                 <font key="font" metaFont="system"/>
-                                                <string key="title">V2RayXS is shipped with a xray binary file in the app bundle. If anyone wants to use a different xray core binary, put the binary file in the following directory:</string>
+                                                <string key="title">V2RayXS ships Xray and geodata in the app bundle. To use your own, put the files in this folder:</string>
                                                 <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
                                                 <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                                             </textFieldCell>
@@ -804,35 +805,43 @@ Gw
                                         <textField focusRingType="none" horizontalHuggingPriority="251" verticalHuggingPriority="750" fixedFrame="YES" preferredMaxLayoutWidth="415" translatesAutoresizingMaskIntoConstraints="NO" id="Tfr-JR-7kn">
                                             <rect key="frame" x="17" y="218" width="419" height="17"/>
                                             <autoresizingMask key="autoresizingMask"/>
-                                            <textFieldCell key="cell" title="Make sure the following files are present:" id="1Vl-aE-8sN">
+                                            <textFieldCell key="cell" title="V2RayXS uses these files from the folder:" id="1Vl-aE-8sN">
                                                 <font key="font" metaFont="system"/>
                                                 <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
                                                 <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                                             </textFieldCell>
                                         </textField>
                                         <textField focusRingType="none" horizontalHuggingPriority="251" verticalHuggingPriority="750" fixedFrame="YES" translatesAutoresizingMaskIntoConstraints="NO" id="SbL-wp-TzE">
-                                            <rect key="frame" x="49" y="136" width="326" height="74"/>
+                                            <rect key="frame" x="49" y="176" width="438" height="34"/>
                                             <autoresizingMask key="autoresizingMask"/>
                                             <textFieldCell key="cell" lineBreakMode="clipping" id="QCH-HC-h7v">
                                                 <font key="font" metaFont="system"/>
-                                                <string key="title">xray-core/xray
-xray-core/geoip.dat
-xray-core/geosite.dat</string>
+                                                <string key="title">xray, geoip.dat, geosite.dat: own core with own geodata
+geoip.dat, geosite.dat: own geodata with the bundled core</string>
                                                 <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
                                                 <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                                             </textFieldCell>
                                         </textField>
-                                        <textField focusRingType="none" horizontalHuggingPriority="251" verticalHuggingPriority="750" fixedFrame="YES" translatesAutoresizingMaskIntoConstraints="NO" id="0qM-00-ZuW">
-                                            <rect key="frame" x="17" y="94" width="362" height="34"/>
+                                        <textField focusRingType="none" horizontalHuggingPriority="251" verticalHuggingPriority="750" fixedFrame="YES" translatesAutoresizingMaskIntoConstraints="NO" id="gD1-St-aTs">
+                                            <rect key="frame" x="17" y="139" width="330" height="17"/>
                                             <autoresizingMask key="autoresizingMask"/>
-                                            <textFieldCell key="cell" lineBreakMode="clipping" id="ldu-SF-fOd">
+                                            <textFieldCell key="cell" lineBreakMode="truncatingTail" title="Geodata" id="gD2-St-cLl">
                                                 <font key="font" metaFont="system"/>
-                                                <string key="title">Otherwise V2RayXS will still use default xray core binaries. 
-Compatibility is not guaranteed.</string>
-                                                <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
+                                                <color key="textColor" name="secondaryLabelColor" catalog="System" colorSpace="catalog"/>
                                                 <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                                             </textFieldCell>
                                         </textField>
+                                        <button verticalHuggingPriority="750" fixedFrame="YES" translatesAutoresizingMaskIntoConstraints="NO" id="gD3-Up-btN">
+                                            <rect key="frame" x="347" y="130" width="140" height="32"/>
+                                            <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
+                                            <buttonCell key="cell" type="push" title="Update Geodata" bezelStyle="rounded" alignment="center" borderStyle="border" imageScaling="proportionallyDown" inset="2" id="gD4-Up-cLl">
+                                                <behavior key="behavior" pushIn="YES" lightByBackground="YES" lightByGray="YES"/>
+                                                <font key="font" metaFont="system"/>
+                                            </buttonCell>
+                                            <connections>
+                                                <action selector="updateGeoData:" target="-2" id="gD6-Ac-tN1"/>
+                                            </connections>
+                                        </button>
                                         <textField focusRingType="none" horizontalHuggingPriority="251" verticalHuggingPriority="750" fixedFrame="YES" translatesAutoresizingMaskIntoConstraints="NO" id="5po-D3-mgl">
                                             <rect key="frame" x="15" y="41" width="424" height="17"/>
                                             <autoresizingMask key="autoresizingMask"/>
@@ -1030,12 +1039,10 @@ Gw
                         <font key="font" size="13" name="Courier"/>
                         <string key="title">When an incoming connection matches ALL the criterions (domain/ip/port/network), it will be routed to the provided outbound tag. 
 
-Four preset tags:
+Three preset tags:
    main: the outbound users choose from the menu list "Server"
 decline: the connection will be closed.
- direct: incoming traffic will be send to its real destination.
-balance: v2ray will randomly pickup an outbound from all 
-         provided outbounds.</string>
+ direct: incoming traffic will be send to its real destination.</string>
                         <color key="textColor" name="labelColor" catalog="System" colorSpace="catalog"/>
                         <color key="backgroundColor" name="textBackgroundColor" catalog="System" colorSpace="catalog"/>
                     </textFieldCell>

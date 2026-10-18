@@ -14,7 +14,11 @@ BOOL loadDefaultRouteBaseline(SYSRouteHelper* routeHelper,
                               void (^syncRuntimeSessionFromBackupBlock)(void),
                               NSString** errorMessage);
 
+// Besides the takeover routes, adds a default route scoped to physicalInterface for sockets bound to it,
+// such as the core's outbounds. All of them are recorded as takeover entries and removed together.
 BOOL installIPv4TakeoverRoutes(NSString* tunName,
+                               NSString* gateway,
+                               NSString* physicalInterface,
                                SYSRouteHelper* routeHelper,
                                NSMutableArray<NSDictionary*>* __strong *activeIPv4TakeoverRoutes,
                                NSMutableDictionary* backup,

@@ -157,8 +157,8 @@
     aCopy.security = self.security;
     aCopy.network = self.network;
     aCopy.sendThrough = [NSString stringWithString:nilCoalescing(self.sendThrough, @"")];
-    aCopy.streamSettings = [NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:self.streamSettings]];
-    aCopy.muxSettings = [NSKeyedUnarchiver unarchiveObjectWithData:[NSKeyedArchiver archivedDataWithRootObject:self.muxSettings]];
+    aCopy.streamSettings = [self.streamSettings mutableDeepCopy];
+    aCopy.muxSettings = [self.muxSettings mutableDeepCopy];
     return aCopy;
 }
 

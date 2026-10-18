@@ -74,7 +74,7 @@
 /* Class = "NSMenuItem"; title = "Correct Spelling Automatically"; ObjectID = "78Y-hA-62v"; */
 "78Y-hA-62v.title" = "Correct Spelling Automatically";
 
-/* Class = "NSMenu"; title = "Routing Rule"; ObjectID = "8Ld-d4-m0U"; */
+/* Class = "NSMenu"; title = "Routing"; ObjectID = "8Ld-d4-m0U"; */
 "8Ld-d4-m0U.title" = "路由规则";
 
 /* Class = "NSMenuItem"; title = "Quit"; ObjectID = "8f2-cF-RxH"; */
@@ -296,7 +296,7 @@
 /* Class = "NSMenuItem"; title = "Use Default"; ObjectID = "agt-UL-0e3"; */
 "agt-UL-0e3.title" = "Use Default";
 
-/* Class = "NSMenuItem"; title = "Routing Rule"; ObjectID = "bUi-AV-IfA"; */
+/* Class = "NSMenuItem"; title = "Routing"; ObjectID = "bUi-AV-IfA"; */
 "bUi-AV-IfA.title" = "路由规则";
 
 /* Class = "NSMenuItem"; title = "Show Colors"; ObjectID = "bgn-CT-cEk"; */

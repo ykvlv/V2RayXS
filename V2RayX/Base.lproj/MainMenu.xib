@@ -738,9 +738,9 @@
                     <modifierMask key="keyEquivalentModifierMask"/>
                     <menu key="submenu" title="Server" id="eqU-gH-G4L"/>
                 </menuItem>
-                <menuItem title="Routing Rule" id="bUi-AV-IfA">
+                <menuItem title="Routing" id="bUi-AV-IfA">
                     <modifierMask key="keyEquivalentModifierMask"/>
-                    <menu key="submenu" title="Routing Rule" id="8Ld-d4-m0U"/>
+                    <menu key="submenu" title="Routing" id="8Ld-d4-m0U"/>
                 </menuItem>
                 <menuItem title="Configure..." id="0hJ-Jo-rS2">
                     <modifierMask key="keyEquivalentModifierMask"/>

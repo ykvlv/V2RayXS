@@ -98,6 +98,7 @@
     
     // core path
     self.corePathField.stringValue = [NSString stringWithFormat:@"%@/Library/Application Support/V2RayXS/xray-core/",NSHomeDirectory()];
+    [self showGeoDataStatus];
     self.enableRestore = configWindowController.enableRestore;
     
     self.enableEncryption = configWindowController.enableEncryption;
@@ -197,7 +198,7 @@
     if(tableView == _ruleTable) {
         NSUInteger ruleCount = [self.routingRuleSets[_selectedRuleSet][@"rules"] count];
         NSDictionary* rule = self.routingRuleSets[_selectedRuleSet][@"rules"][row];
-        NSString* routeTo = rule[@"outboundTag"] ? rule[@"outboundTag"] : rule[@"balancerTag"];
+        NSString* routeTo = rule[@"outboundTag"];
         return row + 1 == ruleCount ? [NSString stringWithFormat:@"final:%@", routeTo] : [NSString stringWithFormat:@"%lu:%@", row, routeTo] ;
     }
     if (tableView == _subscriptionTable) {
@@ -286,13 +287,7 @@
     if (notification.object == _routeToBox) {
         NSMutableDictionary* rule =
         self.routingRuleSets[_selectedRuleSet][@"rules"][_selectedRule];
-        if ([@"balance" isEqualToString:_routeToBox.stringValue]) {
-            rule[@"balancerTag"] = @"balance";
-            [rule removeObjectForKey:@"outboundTag"];
-        } else {
-            rule[@"outboundTag"] = _routeToBox.stringValue;
-            [rule removeObjectForKey:@"balancerTag"];
-        }
+        rule[@"outboundTag"] = _routeToBox.stringValue;
     }
     if (notification.object == _portField) {
         NSMutableDictionary* rule =
@@ -467,7 +462,6 @@
         [_subscriptions removeObjectAtIndex:[_subscriptionTable selectedRow]];
         [_subscriptionTable reloadData];
     }
-    NSLog(@"%@", _subscriptions);
 }
 
 // configs
@@ -510,6 +504,32 @@
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:self.corePathField.stringValue]]];
 }
 
+- (IBAction)updateGeoData:(NSButton*)sender {
+    AppDelegate* app = configWindowController.appDelegate;
+    // The saved rule sets keep running if this window is cancelled.
+    NSArray* rules = [[app.routingRuleSets arrayByAddingObjectsFromArray:self.routingRuleSets] valueForKeyPath:@"@unionOfArrays.rules"];
+    sender.enabled = NO;
+    _geoDataStatusField.stringValue = @"Downloading geodata...";
+    [app updateDefaultGeoData:rules completion:^(NSString* failure) {
+        sender.enabled = YES;
+        [self showGeoDataStatus];
+        if (!failure) return;
+        NSAlert* alert = [NSAlert new];
+        alert.messageText = failure;
+        [alert beginSheetModalForWindow:self.window completionHandler:nil];
+    }];
+}
+
+- (void)showGeoDataStatus {
+    NSString* directory = [configWindowController.appDelegate defaultGeoDirectory];
+    if ([directory isEqual:NSBundle.mainBundle.resourcePath]) {
+        _geoDataStatusField.stringValue = @"Geodata: bundled with V2RayXS";
+        return;
+    }
+    NSDate* date = [NSFileManager.defaultManager attributesOfItemAtPath:[directory stringByAppendingPathComponent:@"geosite.dat"] error:nil].fileModificationDate;
+    _geoDataStatusField.stringValue = [@"Geodata: xray-core folder, " stringByAppendingString:[NSDateFormatter localizedStringFromDate:date ?: NSDate.date dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle]];
+}
+
 - (IBAction)changeEnableRestore:(NSPopUpButton*)sender {
     _enableRestore = [sender indexOfSelectedItem];
 }
@@ -538,7 +558,7 @@
     } else if ([@"Core" isEqualToString:tabTitle]) {
         [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://xtls.github.io/en/document/install.html"]];
     } else {
-        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/tzmax/V2RayXS#readme"]];
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/ykvlv/V2RayXS#readme"]];
     }
 }
 
@@ -614,7 +634,7 @@
         [_networkListButton selectItemAtIndex:searchInArray(rules[@"network"], ROUTING_NETWORK_LIST)];
         
         
-        _routeToBox.stringValue = rules[@"outboundTag"] ? rules[@"outboundTag"] : rules[@"balancerTag"];
+        _routeToBox.stringValue = rules[@"outboundTag"];
     }
 }
 

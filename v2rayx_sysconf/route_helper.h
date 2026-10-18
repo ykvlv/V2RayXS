@@ -56,9 +56,10 @@ typedef NS_ENUM(NSInteger, SYSRouteAddressFamily) {
 
 -(BOOL) changeDefaultRouteViaGateway:(NSString*) gateway family:(SYSRouteAddressFamily)family;
 
--(BOOL) addScopedDefaultRouteViaGateway:(NSString*) gateway interface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
+// Sockets bound to the interface (IP_BOUND_IF) route by it while the tun holds the unscoped routes.
+-(BOOL) setScopedDefaultRouteViaGateway:(NSString*) gateway interface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
 
--(BOOL) changeScopedDefaultRouteViaGateway:(NSString*) gateway interface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
+-(BOOL) deleteScopedDefaultRouteViaGateway:(NSString*) gateway interface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
 
 -(BOOL) deleteDefaultRouteForFamily:(SYSRouteAddressFamily)family;
 
@@ -69,10 +70,6 @@ typedef NS_ENUM(NSInteger, SYSRouteAddressFamily) {
 -(BOOL) deleteDefaultRouteViaInterface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
 
 -(BOOL) changeDefaultRouteViaInterface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
-
--(BOOL) addScopedDefaultRouteViaInterface:(NSString*) interfaceName scope:(NSString*) scopeInterface family:(SYSRouteAddressFamily)family;
-
--(BOOL) changeScopedDefaultRouteViaInterface:(NSString*) interfaceName scope:(NSString*) scopeInterface family:(SYSRouteAddressFamily)family;
 
 -(BOOL) addHostRouteToDestination:(NSString*) destination gateway:(NSString*) gateway family:(SYSRouteAddressFamily)family;
 
@@ -93,6 +90,11 @@ typedef NS_ENUM(NSInteger, SYSRouteAddressFamily) {
 -(BOOL) hasNetworkRouteToDestination:(NSString*) destinationCIDR gateway:(NSString*) gateway family:(SYSRouteAddressFamily)family;
 
 -(BOOL) hasNetworkRouteToDestination:(NSString*) destinationCIDR interface:(NSString*) interfaceName family:(SYSRouteAddressFamily)family;
+
+// Connections to a rejected destination fail at once instead of timing out.
+-(BOOL) addRejectRouteToDestination:(NSString*) destinationCIDR family:(SYSRouteAddressFamily)family;
+
+-(BOOL) deleteRejectRouteToDestination:(NSString*) destinationCIDR family:(SYSRouteAddressFamily)family;
 
 @end
 

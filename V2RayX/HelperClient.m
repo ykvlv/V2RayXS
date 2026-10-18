@@ -265,7 +265,7 @@ static NSDictionary* helperClientReceiveFileDescriptorAndPayload(int socketFD) {
     }
 
     NSString* socketFDString = @"0";
-    NSArray<NSString*>* arguments = preferredName.length > 0 ? @[@"tun", @"allocate", preferredName, socketFDString] : @[@"tun", @"allocate", socketFDString];
+    NSArray<NSString*>* arguments = preferredName.length > 0 ? @[@"tun", @"allocate", preferredName, socketFDString, @"--json"] : @[@"tun", @"allocate", socketFDString, @"--json"];
     arguments = helperClientArgumentsWithOptionalDebug(arguments);
     int helperSocketFD = sockets[1];
     NSDictionary* helperResult = runCommandLineResultWithStdinFD(self.helperPath, arguments, helperSocketFD);
@@ -318,20 +318,26 @@ static NSDictionary* helperClientReceiveFileDescriptorAndPayload(int socketFD) {
     return [self runCommandWithArguments:@[@"restore"] action:action];
 }
 
-- (NSDictionary*)startEmbeddedTunWithLocalPort:(NSInteger)localPort action:(NSString*)action {
+static NSArray<NSString*>* splitDNSArguments(NSArray<NSString*>* serverDomains) {
+    return serverDomains.count > 0 ? @[@"--split-dns", [serverDomains componentsJoinedByString:@","]] : @[];
+}
+
+- (NSDictionary*)startEmbeddedTunWithLocalPort:(NSInteger)localPort serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action {
     if (![self ensureDaemonIsRunning]) {
         return nil;
     }
-    return [self runJSONCommandWithArguments:@[@"tun", @"start", [NSString stringWithFormat:@"%ld", (long)localPort]] action:action];
+    NSArray<NSString*>* arguments = [@[@"tun", @"start", [NSString stringWithFormat:@"%ld", (long)localPort]] arrayByAddingObjectsFromArray:splitDNSArguments(serverDomains)];
+    return [self runJSONCommandWithArguments:[arguments arrayByAddingObject:@"--json"] action:action];
 }
 
 - (NSDictionary*)tunStatusWithAction:(NSString*)action {
     return [self runJSONCommandWithArguments:@[@"tun", @"status", @"--json"] action:action];
 }
 
-- (NSDictionary*)activateTunWithLeaseId:(NSString*)leaseId action:(NSString*)action {
-    NSArray<NSString*>* arguments = leaseId.length > 0 ? @[@"tun", @"activate", leaseId, @"--json"] : @[@"tun", @"activate", @"--json"];
-    return [self runJSONCommandAllowingFailureWithArguments:arguments action:action];
+- (NSDictionary*)activateTunWithLeaseId:(NSString*)leaseId serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action {
+    NSArray<NSString*>* arguments = leaseId.length > 0 ? @[@"tun", @"activate", leaseId] : @[@"tun", @"activate"];
+    arguments = [arguments arrayByAddingObjectsFromArray:splitDNSArguments(serverDomains)];
+    return [self runJSONCommandAllowingFailureWithArguments:[arguments arrayByAddingObject:@"--json"] action:action];
 }
 
 - (BOOL)tunActivationResponseIsActive:(NSDictionary*)response {
@@ -360,10 +366,10 @@ static NSDictionary* helperClientReceiveFileDescriptorAndPayload(int socketFD) {
     return YES;
 }
 
-- (NSDictionary*)activateTunLeaseSynchronouslyWithLeaseId:(NSString*)leaseId action:(NSString*)action {
+- (NSDictionary*)activateTunLeaseSynchronouslyWithLeaseId:(NSString*)leaseId serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action {
     NSDictionary* response = nil;
     for (NSInteger attempt = 0; attempt < 10; attempt += 1) {
-        response = [self activateTunWithLeaseId:leaseId action:action];
+        response = [self activateTunWithLeaseId:leaseId serverDomains:serverDomains action:action];
         if ([self tunActivationResponseIsActive:response]) {
             return response;
         }
@@ -385,7 +391,7 @@ static NSDictionary* helperClientReceiveFileDescriptorAndPayload(int socketFD) {
 }
 
 - (NSDictionary*)syncRouteWhitelistAtPath:(NSString*)path action:(NSString*)action {
-    return [self runJSONCommandWithArguments:@[@"route", @"sync-file", path] action:action];
+    return [self runJSONCommandWithArguments:@[@"route", @"sync-file", path, @"--json"] action:action];
 }
 
 - (BOOL)clearRouteWhitelistWithAction:(NSString*)action {

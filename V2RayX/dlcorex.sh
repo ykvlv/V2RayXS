@@ -1,83 +1,66 @@
 #!/bin/bash
-VERSION="26.3.27"
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-BOLD='\033[1m'
-NORMAL='\033[0m'
+set -euo pipefail
 
-osArch=$(uname -m)
-targetArch="${ARCHS:-$osArch}"
-case "$targetArch" in
+VERSION="26.9.9"
+GEO_VERSION="202610082207"
+GEOIP_SHA256="116cc0f03d48991962f7f9cdbbcf53d45d89777f9c3cd1a663210853e5df6093"
+GEOSITE_SHA256="cc5f00ba417ee56daea66d160e8cf8704fbfb2a6af8ae27fd64017cb1ebcf034"
+
+case "${ARCHS:-$(uname -m)}" in
     *arm64*)
         coreArch="arm64"
         archName="arm64-v8a"
+        coreSHA256="7616e4d8d5b8bedaee14ebe167954e24f35ccea58cdb941600e2ff76509fc31c"
         ;;
     *x86_64*)
         coreArch="x86_64"
         archName="64"
+        coreSHA256="dc7af506e28dd45fa2847841517674f0a0c5af8827d8ac40d1aa9615267e3a78"
         ;;
     *)
-        coreArch="$osArch"
-        if [[ "$coreArch" == "arm64" ]]; then
-            archName="arm64-v8a"
-        else
-            archName="64"
-        fi
+        echo "Unsupported Xray architecture: ${ARCHS:-$(uname -m)}" >&2
+        exit 1
         ;;
 esac
 
 cd "$SRCROOT"
-output="v${VERSION}"
-existingArch=""
-if [[ -f ./xray-core-bin/xray ]]; then
-    archInfo=$(/usr/bin/lipo -info ./xray-core-bin/xray 2>/dev/null || true)
-    if [[ "$archInfo" == *"architecture: arm64"* ]] || [[ "$archInfo" == *"are: arm64"* ]]; then
-        existingArch="arm64"
-    elif [[ "$archInfo" == *"architecture: x86_64"* ]] || [[ "$archInfo" == *"are: x86_64"* ]]; then
-        existingArch="x86_64"
-    fi
 
-    if [[ "$existingArch" == "$coreArch" ]]; then
-        output=$(./xray-core-bin/xray --version)
-    fi
-fi
-existingVersion=${output:5:${#VERSION}}
+checksumMatches() {
+    [[ -f "$1" ]] && [[ "$(shasum -a 256 "$1" | awk '{print $1}')" == "$2" ]]
+}
 
-if [[ "$VERSION" != "$existingVersion" ]] || [[ "$existingArch" != "$coreArch" ]]; then
-    getCore=0
-    [ -d "xray-core-bin" ] && rm -rf xray-core-bin
-    mkdir -p xray-core-bin
-    cd xray-core-bin
-    curl -s -L -o xray-macos.zip https://github.com/XTLS/Xray-core/releases/download/v${VERSION}/Xray-macos-${archName}.zip
-    if [[ $? == 0 ]]; then
-        unzip -o xray-macos.zip
-        getCore=1
-    else
-        unzip -o ~/Downloads/xray-macos.zip
-        if [[ $? != 0 ]]; then
-            getCore=0
-        else
-            chmod +x xray-macos/xray
-            output=$(xray-macos/xray --version)
-            existingVersion=${output:5:${#VERSION}}
-            echo "existingVersion ${existingVersion}"
-            if [[ "$VERSION" != "$existingVersion" ]]; then
-                echo "${RED}xray-macos.zip in the Downloads folder does not contain version ${VERSION}."
-                echo "下载文件夹里的xray-macos.zip不是${VERSION}版本。${NORMAL}"
-                getCore=0
-            else
-                getCore=1
-            fi
-        fi
-    fi
-    if [[ $getCore == 0 ]]; then
-        echo "${RED}download failed!"
-        echo "Use whatever method you can think of, get xray-macos.zip of version ${VERSION} from xtls.github.io, and put it in the folder 'Downloads' and try this script again."
-        echo "用你能想到任何办法，从 xtls.github.io 下载好${VERSION}版本的 xray-macos.zip，放在“下载”文件夹里面，然后再次运行这个脚本。${NORMAL}"
-        exit 1
-    fi
-    chmod +x ./xray
-    rm -r xray-*
-else
+if checksumMatches xray-core-bin/xray "$coreSHA256" &&
+   checksumMatches xray-core-bin/geoip.dat "$GEOIP_SHA256" &&
+   checksumMatches xray-core-bin/geosite.dat "$GEOSITE_SHA256"; then
     exit 0
 fi
+
+staging=$(mktemp -d "$SRCROOT/xray-core-bin.XXXXXX")
+trap 'rm -rf "$staging"' EXIT
+
+download() {
+    curl --fail --location --silent --show-error --retry 2 --connect-timeout 15 --max-time 180 "$1" -o "$2"
+}
+
+verify() {
+    if ! checksumMatches "$1" "$2"; then
+        echo "Checksum mismatch: $1" >&2
+        exit 1
+    fi
+}
+
+echo "Downloading Xray $VERSION ($coreArch) and Loyalsoldier geo files $GEO_VERSION"
+download "https://github.com/XTLS/Xray-core/releases/download/v${VERSION}/Xray-macos-${archName}.zip" "$staging/xray.zip"
+unzip -q -j "$staging/xray.zip" xray -d "$staging"
+verify "$staging/xray" "$coreSHA256"
+chmod +x "$staging/xray"
+
+geoURL="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/$GEO_VERSION"
+download "$geoURL/geoip.dat" "$staging/geoip.dat"
+download "$geoURL/geosite.dat" "$staging/geosite.dat"
+verify "$staging/geoip.dat" "$GEOIP_SHA256"
+verify "$staging/geosite.dat" "$GEOSITE_SHA256"
+
+rm -f "$staging/xray.zip"
+rm -rf xray-core-bin
+mv "$staging" xray-core-bin

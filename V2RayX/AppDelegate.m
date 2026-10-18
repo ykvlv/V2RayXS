@@ -13,6 +13,8 @@
 #import "ServerProfile.h"
 #import "MutableDeepCopying.h"
 #import "ConfigImporter.h"
+#import "SubscriptionRouting.h"
+#import "SubscriptionStore.h"
 #import "NSData+AES256Encryption.h"
 #import "TLSCertSha256.h"
 #import <sys/stat.h>
@@ -25,7 +27,6 @@
 #import <netdb.h>
 #import <stdarg.h>
 
-#define kUseAllServer -10
 
 @class HelperClient;
 
@@ -77,6 +78,14 @@ typedef struct {
     BOOL helperFailureAlertVisible;
     
     NSData* v2rayJSONconfig;
+    NSDictionary* subscriptionRecords;
+    NSDictionary* subscriptionLinkByTag;
+    BOOL automaticSubscriptionRouting;
+    BOOL subscriptionUpdateInProgress;
+    BOOL subscriptionStartupPending;
+    BOOL subscriptionForcedRefreshPending;
+    id networkStore;
+    NSString* networkSignature;
 }
 
 - (NSString*)helperInstallSourcePath;
@@ -109,6 +118,7 @@ typedef struct {
 - (NSString*)tunStatusDisplayText;
 - (void)reconcileTunSessionForCurrentRuntime;
 - (void)handleWorkspaceDidWake:(NSNotification*)notification;
+- (void)networkMayHaveChanged;
 - (void)activateXrayTunLeaseAfterCoreSpawn:(NSDictionary*)xrayTunFDContext;
 - (void)reportHelperFailureMessage:(NSString*)message;
 - (BOOL)isUsingXrayTunMode;
@@ -142,6 +152,45 @@ static NSString* const kMinimumRemovedLegacyKCPVersion = @"26.2.6";
 static int const kXrayTunFDTarget = 3;
 
 static NSString* const kStoredTunLeaseIdKey = @"xrayTunLeaseId";
+
+static NSString* physicalInterface(NSString* name) {
+    return [name isKindOfClass:NSString.class] && name.length && ![name hasPrefix:@"utun"] && ![name hasPrefix:@"lo"] ? name : nil;
+}
+
+static NSString* primaryNetworkInterface(void) {
+    NSDictionary* state = CFBridgingRelease(SCDynamicStoreCopyValue(NULL, CFSTR("State:/Network/Global/IPv4")));
+    return physicalInterface(state[@"PrimaryInterface"]);
+}
+
+static BOOL usesFakeDNS(NSDictionary* dns) {
+    NSArray* servers = [dns isKindOfClass:NSDictionary.class] && [dns[@"servers"] isKindOfClass:NSArray.class] ? dns[@"servers"] : @[];
+    for (id server in servers) {
+        if ([server isEqual:@"fakedns"] || ([server isKindOfClass:NSDictionary.class] && [server[@"address"] isEqual:@"fakedns"])) return YES;
+    }
+    return NO;
+}
+
+// Interface and gateway; in tun mode the core's outbounds and the scoped default route depend on both.
+static NSString* currentNetworkSignature(void) {
+    NSDictionary* state = CFBridgingRelease(SCDynamicStoreCopyValue(NULL, CFSTR("State:/Network/Global/IPv4")));
+    NSString* interface = physicalInterface(state[@"PrimaryInterface"]);
+    return interface ? [NSString stringWithFormat:@"%@ %@", interface, state[@"Router"] ?: @""] : nil;
+}
+
+static void networkStateChanged(SCDynamicStoreRef store, CFArrayRef changedKeys, void* info) {
+    AppDelegate* delegate = (__bridge AppDelegate*)info;
+    // A network change arrives as a burst of updates; act once it settles.
+    [NSObject cancelPreviousPerformRequestsWithTarget:delegate selector:@selector(networkMayHaveChanged) object:nil];
+    [delegate performSelector:@selector(networkMayHaveChanged) withObject:nil afterDelay:2];
+}
+
+static NSString* geoDataRoot(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/V2RayXS/geodata"];
+}
+
+static NSString* customCoreDirectory(void) {
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/V2RayXS/xray-core"];
+}
 
 static HelperClient* activeHelperClient(void) {
     return appDelegate != nil ? appDelegate->helperClient : nil;
@@ -478,26 +527,8 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     return v2rayJSONconfig;
 }
 
-// a good reference: https://blog.gaelfoppolo.com/user-notifications-in-macos-66c25ed5c692
-
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center
-     shouldPresentNotification:(NSUserNotification *)notification {
-    return YES;
-}
-
-- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
-    switch (notification.activationType) {
-        case NSUserNotificationActivationTypeActionButtonClicked:
-            [self inputPassword:self];
-            break;
-        default:
-            break;
-    }
-}
-
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     [[NSProcessInfo processInfo] disableAutomaticTermination:@"V2RayXS runs as a menu bar app."];
-    [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:self];
     
     // check helper
     if (![self installHelper:false]) {
@@ -605,7 +636,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
             [configData writeToFile:temporaryConfigPath atomically:YES];
             self->coreConfigPath = temporaryConfigPath;
             NSArray* coreArguments = @[@"-config", temporaryConfigPath];
-            NSMutableDictionary* environmentOverrides = [[NSMutableDictionary alloc] init];
+            NSMutableDictionary* environmentOverrides = [@{@"XRAY_LOCATION_ASSET": [self currentGeoDirectory]} mutableCopy];
             if (xrayTunFDContext != nil) {
                 int tunFD = [xrayTunFDContext[@"fd"] intValue];
                 int fdFlags = fcntl(tunFD, F_GETFD);
@@ -693,7 +724,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     
     // initialize UI
     _statusBarItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    [_statusBarItem setHighlightMode:YES];
     _pacModeItem.tag = pacMode;
     _globalModeItem.tag = globalMode;
     _manualModeItem.tag = manualMode;
@@ -703,22 +733,18 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     [self readDefaults];
     self.encryptionKey = @"";
     if (_enableEncryption && ([profiles count] > 0 || [customOutbounds count] > 0 || [_subscriptions count] > 0)) {
-        NSUserNotification* notification = [[NSUserNotification alloc] init];
-        notification.identifier = [NSString stringWithFormat:@"cenmrev.v2rayxs.passwork.%@", [NSUUID UUID]];
-        notification.title = @"Input Password";
-        notification.informativeText = @"input your password to continue";
-        notification.soundName = NSUserNotificationDefaultSoundName;
-        notification.actionButtonTitle = @"Continue";
-        notification.hasActionButton = true;
-        [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:notification];
         [_statusBarItem setMenu:_authMenu];
-        [_statusBarItem setImage:[NSImage imageNamed:@"statusBarIcon_disabled"]];
+        _statusBarItem.button.image = [NSImage imageNamed:@"statusBarIcon_disabled"];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self inputPassword:self];
+        });
     } else {
         [self continueInitialization];
     }
 }
 
 - (IBAction)inputPassword:(id)sender {
+    [NSApp activateIgnoringOtherApps:YES];
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"input password to decrypt configurations";
     [alert addButtonWithTitle:@"Decrypt"];
@@ -805,6 +831,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     }
     profiles = managedProfiles;
     customOutbounds = splitCustomOutbounds;
+    self.encryptionKey = key;
     return true;
 }
 
@@ -812,7 +839,18 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     [_statusBarItem setMenu:_statusBarMenu];
     [self probeTunRoutingSessionState];
     // start proxy
-    [self updateSubscriptions:self]; // startup restore is handled after subscriptions are loaded
+    subscriptionRecords = [SubscriptionStore loadWithKey:self.encryptionKey];
+    if (![self waitForSubscriptionServers]) [self restoreStartupRuntimeState];
+    networkSignature = currentNetworkSignature();
+    SCDynamicStoreContext context = {0, (__bridge void*)self, NULL, NULL, NULL};
+    SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("V2RayXS"), networkStateChanged, &context);
+    SCDynamicStoreSetNotificationKeys(store, (__bridge CFArrayRef)@[@"State:/Network/Global/IPv4"], NULL);
+    SCDynamicStoreSetDispatchQueue(store, dispatch_get_main_queue());
+    networkStore = CFBridgingRelease(store);
+    [NSTimer scheduledTimerWithTimeInterval:60 repeats:YES block:^(NSTimer* timer) {
+        [self refreshSubscriptions:NO];
+    }];
+    [self refreshSubscriptions:NO];
 }
 
 - (void)ensureCoreLogDirectoryExists {
@@ -1086,19 +1124,21 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 }
 
 - (void)collectServerAddressesFromOutbound:(NSDictionary*)outbound into:(NSMutableArray<NSString*>*)serverAddresses {
-    NSArray* vnextList = outbound[@"settings"][@"vnext"];
-    if ([vnextList isKindOfClass:[NSArray class]]) {
-        for (NSDictionary* vnextItem in vnextList) {
-            NSString* address = vnextItem[@"address"];
-            if ([address isKindOfClass:[NSString class]] && address.length > 0 && ![serverAddresses containsObject:address]) {
-                [serverAddresses addObject:address];
-            }
-        }
+    NSDictionary* settings = [outbound[@"settings"] isKindOfClass:NSDictionary.class] ? outbound[@"settings"] : nil;
+    NSString* flatAddress = settings[@"address"];
+    if ([flatAddress isKindOfClass:NSString.class] && flatAddress.length > 0 && ![serverAddresses containsObject:flatAddress]) {
+        [serverAddresses addObject:flatAddress];
     }
-    NSArray* serversList = outbound[@"settings"][@"servers"];
-    if ([serversList isKindOfClass:[NSArray class]]) {
-        for (NSDictionary* serverItem in serversList) {
-            NSString* address = serverItem[@"address"] ?: serverItem[@"server"];
+    NSDictionary* xhttp = [outbound[@"streamSettings"] isKindOfClass:NSDictionary.class] ? outbound[@"streamSettings"][@"xhttpSettings"] : nil;
+    id extra = [xhttp isKindOfClass:NSDictionary.class] ? xhttp[@"extra"] : nil;
+    id download = [extra isKindOfClass:NSDictionary.class] && extra[@"downloadSettings"] ? extra[@"downloadSettings"] : [xhttp isKindOfClass:NSDictionary.class] ? xhttp[@"downloadSettings"] : nil;
+    NSString* downloadAddress = [download isKindOfClass:NSDictionary.class] ? download[@"address"] : nil;
+    if ([downloadAddress isKindOfClass:NSString.class] && downloadAddress.length > 0 && ![serverAddresses containsObject:downloadAddress]) {
+        [serverAddresses addObject:downloadAddress];
+    }
+    for (NSString* key in @[@"vnext", @"servers"]) {
+        for (NSDictionary* item in [settings[key] isKindOfClass:NSArray.class] ? settings[key] : @[]) {
+            NSString* address = [item isKindOfClass:NSDictionary.class] ? item[@"address"] ?: item[@"server"] : nil;
             if ([address isKindOfClass:[NSString class]] && address.length > 0 && ![serverAddresses containsObject:address]) {
                 [serverAddresses addObject:address];
             }
@@ -1169,24 +1209,28 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     return [resolvedIPs array];
 }
 
+// Configs the app builds bind their outbounds to the physical interface, so only a custom JSON config needs its
+// servers routed around the tun. A route to a shared address such as Cloudflare's would also carry other sites past the proxy.
 - (NSArray<NSString*>*)tunWhitelistIPAddresses {
+    if (![self isUsingCustomJSONConfig]) return @[];
     NSMutableArray<NSString*>* serverAddresses = [[NSMutableArray alloc] init];
-    if ([self isUsingCustomJSONConfig]) {
-        NSData* customProfileData = [NSData dataWithContentsOfFile:cusProfiles[selectedCusServerIndex]];
-        NSDictionary* customJSON = customProfileData != nil ? [NSJSONSerialization JSONObjectWithData:customProfileData options:0 error:nil] : nil;
-        [self collectServerAddressesFromConfigObject:customJSON into:serverAddresses];
-    } else {
-        NSDictionary* fullConfig = [self managedRuntimeConfigObject];
-        NSArray* generatedOutbounds = fullConfig[@"outbounds"];
-        if ([generatedOutbounds isKindOfClass:[NSArray class]]) {
-            for (NSDictionary* outbound in generatedOutbounds) {
-                if ([outbound isKindOfClass:[NSDictionary class]]) {
-                    [self collectServerAddressesFromOutbound:outbound into:serverAddresses];
-                }
-            }
-        }
-    }
+    NSData* customProfileData = [NSData dataWithContentsOfFile:cusProfiles[selectedCusServerIndex]];
+    NSDictionary* customJSON = customProfileData != nil ? [NSJSONSerialization JSONObjectWithData:customProfileData options:0 error:nil] : nil;
+    [self collectServerAddressesFromConfigObject:customJSON into:serverAddresses];
     return [self resolvedIPAddressesFromHosts:serverAddresses];
+}
+
+// Xray looks these up through the system resolver, which the tun session points into the tunnel.
+- (NSArray<NSString*>*)tunServerDomains {
+    NSData* data = [self isUsingCustomJSONConfig] ? [NSData dataWithContentsOfFile:cusProfiles[selectedCusServerIndex]] : v2rayJSONconfig;
+    id config = data.length > 0 ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSMutableArray<NSString*>* hosts = [NSMutableArray array];
+    [self collectServerAddressesFromConfigObject:config into:hosts];
+    NSMutableOrderedSet<NSString*>* domains = [NSMutableOrderedSet orderedSet];
+    for (NSString* host in hosts) {
+        if (!ipAddressBits(host)) [domains addObject:host.lowercaseString];
+    }
+    return domains.array;
 }
 
 - (NSString*)currentTunLeaseIdentifier {
@@ -1300,6 +1344,14 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         return;
     }
 
+    // The helper runs one session at a time, so switching between Xray TUN and tun2socks first stops the other kind.
+    NSString* otherSessionType = [self isUsingXrayTunMode] ? @"embedded" : @"fd_handoff";
+    if ([[self currentTunRoutingSessionStatus][@"sessionType"] isEqual:otherSessionType] && [self shouldTreatTunSessionAsActive]) {
+        appDebugLog(@"reconcileTunSessionForCurrentRuntime stopping %@ session", otherSessionType);
+        [self stopTunRoutingSession];
+        [self probeTunRoutingSessionState];
+    }
+
     if (self.useXrayTun && [self currentCoreSupportsXrayTun]) {
         if (coreProcessPID <= 0 && [self shouldTreatTunSessionAsActive]) {
             appDebugLog(@"reconcileTunSessionForCurrentRuntime found helper-active/core-stopped session %@", [self tunStatusDisplayText]);
@@ -1314,6 +1366,14 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     [self didChangeStatus:notification.object ?: self];
 }
 
+- (void)networkMayHaveChanged {
+    NSString* signature = currentNetworkSignature();
+    if (signature == networkSignature || [signature isEqual:networkSignature]) return;
+    networkSignature = signature;
+    // Losing the network removes the helper's scoped default route, so getting it back rebuilds as well.
+    if (signature && proxyState && proxyMode == tunMode && !subscriptionStartupPending) [self handleWorkspaceDidWake:nil];
+}
+
 - (void)activateXrayTunLeaseAfterCoreSpawn:(NSDictionary*)xrayTunFDContext {
     if (![xrayTunFDContext isKindOfClass:[NSDictionary class]]) {
         return;
@@ -1323,17 +1383,18 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         appDebugLog(@"activateXrayTunLeaseAfterCoreSpawn missing lease id");
         return;
     }
+    NSArray<NSString*>* serverDomains = [self tunServerDomains];
     dispatch_async(taskQueue, ^{
         NSString* tunName = [xrayTunFDContext[@"tunName"] isKindOfClass:[NSString class]] ? xrayTunFDContext[@"tunName"] : nil;
         if (tunName.length > 0) {
             appDebugLog(@"activateXrayTunLeaseAfterCoreSpawn waiting for tun=%@ lease=%@", tunName, leaseId);
             (void)[self waitForTunInterfaceNamed:tunName timeout:5.0];
         }
-        NSDictionary* helperResponse = [self->helperClient activateTunLeaseSynchronouslyWithLeaseId:leaseId action:@"activate Xray tun lease after core spawn"];
+        if (![self syncTunWhitelistRoutes]) return;
+        NSDictionary* helperResponse = [self->helperClient activateTunLeaseSynchronouslyWithLeaseId:leaseId serverDomains:serverDomains action:@"activate Xray tun lease after core spawn"];
         if ([helperResponse isKindOfClass:[NSDictionary class]]) {
             NSDictionary* statusPayload = [helperResponse[@"status"] isKindOfClass:[NSDictionary class]] ? helperResponse[@"status"] : helperResponse;
             [self updateTunRoutingSessionStatusFromPayload:statusPayload];
-            [self syncTunWhitelistRoutes];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self updateMenus];
             });
@@ -1342,24 +1403,23 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     });
 }
 
-- (void)syncTunWhitelistRoutes {
+- (BOOL)syncTunWhitelistRoutes {
     if (self.proxyMode != tunMode || !self.proxyState) {
-        return;
+        return NO;
     }
     NSArray<NSString*>* tunWhitelistIPs = [self tunWhitelistIPAddresses];
     if (tunWhitelistIPs.count > 0) {
-        NSMutableArray* syncArguments = [NSMutableArray arrayWithObject:@"route"];
-        [syncArguments addObject:@"sync-file"];
-        NSString* tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"v2rayxs_tun_whitelist.json"];
+        NSString* tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"v2rayxs-whitelist-%@.json", NSUUID.UUID.UUIDString]];
         NSData* whitelistData = [NSJSONSerialization dataWithJSONObject:tunWhitelistIPs options:0 error:nil];
         if (whitelistData != nil) {
-            [whitelistData writeToFile:tempPath atomically:YES];
-            [syncArguments addObject:tempPath];
-            [helperClient syncRouteWhitelistAtPath:tempPath action:@"sync tun whitelist routes"];
+            if (![whitelistData writeToFile:tempPath atomically:YES]) return NO;
+            NSDictionary* response = [helperClient syncRouteWhitelistAtPath:tempPath action:@"sync tun whitelist routes"];
+            [NSFileManager.defaultManager removeItemAtPath:tempPath error:nil];
+            return [response[@"ok"] boolValue];
         }
-    } else {
-        [helperClient clearRouteWhitelistWithAction:@"clear tun whitelist routes"];
+        return NO;
     }
+    return [helperClient clearRouteWhitelistWithAction:@"clear tun whitelist routes"];
 }
 
 - (BOOL)isUsingXrayTunMode {
@@ -1381,7 +1441,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     } else {
         NSInteger cusHttpPort = 0;
         NSInteger cusSocksPort = 0;
-        if(useMultipleServer || !useCusProfile) {
+        if (!useCusProfile) {
             arguments = @[@"global", [NSString stringWithFormat:@"%ld", localPort], [NSString stringWithFormat:@"%ld", httpPort]];
         } else {
             NSDictionary* cusJson = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:cusProfiles[selectedCusServerIndex]] options:0 error:nil];
@@ -1406,6 +1466,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         }
     }
 
+    NSArray<NSString*>* serverDomains = [self tunServerDomains];
     dispatch_async(taskQueue, ^{
         HelperClient* client = self->helperClient;
         BOOL shouldPreDisableProxy = (self.proxyMode == pacMode) || (self.proxyMode == tunMode && ![self isUsingXrayTunMode]);
@@ -1414,10 +1475,10 @@ static int normalizedExitCodeFromWaitStatus(int status) {
             [client disableSystemProxyWithAction:action];
         }
         if (self.proxyMode == tunMode) {
-            [self syncTunWhitelistRoutes];
+            if (![self syncTunWhitelistRoutes]) return;
         }
         appDebugLog(@"applyNonXrayNetworkMode running helper args=%@", [arguments componentsJoinedByString:@" "]);
-        NSDictionary* helperResponse = self.proxyMode == tunMode ? [client startEmbeddedTunWithLocalPort:self->localPort action:@"apply helper network settings"] : [client runJSONCommandWithArguments:arguments action:@"apply helper network settings"];
+        NSDictionary* helperResponse = self.proxyMode == tunMode ? [client startEmbeddedTunWithLocalPort:self->localPort serverDomains:serverDomains action:@"apply helper network settings"] : [client runJSONCommandWithArguments:arguments action:@"apply helper network settings"];
         if ([helperResponse isKindOfClass:[NSDictionary class]]) {
             NSDictionary* statusPayload = [helperResponse[@"status"] isKindOfClass:[NSDictionary class]] ? helperResponse[@"status"] : helperResponse;
             [self updateTunRoutingSessionStatusFromPayload:statusPayload];
@@ -1465,6 +1526,9 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     NSDictionary* status = [helperClient helperDaemonStatusWithAction:@"check daemon before stop"];
     if ([[status objectForKey:@"daemon"] isEqualToString:@"available"]) {
         [helperClient stopHelperDaemonWithAction:@"stop helper daemon"];
+    } else {
+        // Without a daemon this only restores the DNS a crashed one left overridden.
+        [helperClient stopTunWithAction:@"restore DNS without helper daemon"];
     }
 }
 
@@ -1527,7 +1591,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 }
 
 - (IBAction)openReleasePage:(id)sender {
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/tzmax/V2RayXS/releases/latest"]];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://github.com/ykvlv/V2RayXS/releases/latest"]];
 }
 
 - (IBAction)showAboutPanel:(id)sender {
@@ -1553,7 +1617,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 }
 
 - (IBAction)checkUpgrade:(id)sender {
-    NSURL* url =[NSURL URLWithString:@"https://api.github.com/repos/tzmax/v2rayxs/releases/latest"];
+    NSURL* url =[NSURL URLWithString:@"https://api.github.com/repos/ykvlv/V2RayXS/releases/latest"];
     NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         __block BOOL shouldShowUpgrade = NO;
         @try {
@@ -1606,7 +1670,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     selectedServerIndex = [nilCoalescing(appStatus[@"selectedServerIndex"], @0) integerValue];
     selectedCusServerIndex = [nilCoalescing(appStatus[@"selectedCusServerIndex"], @0) integerValue];
     _selectedRoutingSet = [nilCoalescing(appStatus[@"selectedRoutingSet"], @0) integerValue];
-    useMultipleServer = [nilCoalescing(appStatus[@"useMultipleServer"], @(NO)) boolValue];
     useCusProfile = [nilCoalescing(appStatus[@"useCusProfile"], @(NO)) boolValue];
     self.selectedPacFileName = nilCoalescing(appStatus[@"selectedPacFileName"], @"pac.js");
     
@@ -1619,6 +1682,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     shareOverLan = [nilCoalescing([defaults objectForKey:@"shareOverLan"],@(NO)) boolValue];
     dnsString = nilCoalescing([defaults objectForKey:@"dnsString"], @"localhost");
     _enableRestore = [nilCoalescing([defaults objectForKey:@"enableRestore"],@(NO)) boolValue];
+    automaticSubscriptionRouting = [nilCoalescing([defaults objectForKey:@"automaticSubscriptionRouting"], @YES) boolValue];
     
     profiles = [[NSMutableArray alloc] init];
     if ([defaults objectForKey:@"profiles"] && [[defaults objectForKey:@"profiles"] isKindOfClass:[NSArray class]]) {
@@ -1684,9 +1748,14 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         }
     }
     
-    _routingRuleSets = [@[ROUTING_GLOBAL, ROUTING_BYPASSCN_PRIVATE_APPLE, ROUTING_DIRECT] mutableDeepCopy];
-    if ([[defaults objectForKey:@"routingRuleSets"] isKindOfClass:[NSArray class]] && [[defaults objectForKey:@"routingRuleSets"] count] > 0) {
-        _routingRuleSets = [[defaults objectForKey:@"routingRuleSets"] mutableDeepCopy];
+    _routingRuleSets = [NSMutableArray array];
+    id storedRuleSets = [defaults objectForKey:@"routingRuleSets"];
+    for (id set in [storedRuleSets isKindOfClass:NSArray.class] ? [storedRuleSets mutableDeepCopy] : @[]) {
+        NSMutableDictionary* validatedSet = [ConfigImporter validateRuleSet:set];
+        if (validatedSet) [_routingRuleSets addObject:validatedSet];
+    }
+    if (_routingRuleSets.count == 0) {
+        _routingRuleSets = [@[ROUTING_GLOBAL, ROUTING_BYPASSCN_PRIVATE_APPLE, ROUTING_DIRECT] mutableDeepCopy];
     }
 }
 
@@ -1701,7 +1770,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
               @"selectedCusServerIndex": [NSNumber numberWithInteger:-1],
               @"useCusProfile": @NO,
               @"selectedRoutingSet":@0,
-              @"useMultipleServer": @NO,
               @"selectedPacFileName": @"pac.js"
               },
       @"enableEncryption":@(NO),
@@ -1754,13 +1822,13 @@ static int normalizedExitCodeFromWaitStatus(int status) {
                               @"selectedCusServerIndex": @(selectedCusServerIndex),
                               @"useCusProfile": @(useCusProfile),
                               @"selectedRoutingSet":@(_selectedRoutingSet),
-                              @"useMultipleServer": @(useMultipleServer),
                               @"selectedPacFileName": selectedPacFileName ?: @"pac.js"
                               };
     [[NSUserDefaults standardUserDefaults] setObject:status forKey:@"appStatus"];
 }
 
 - (void)saveConfigInfo {
+    [self saveSubscriptionRecords];
     dispatch_async(taskQueue, ^{
         NSMutableArray* subscriptionToSave;
         NSMutableArray* profilesToSave;
@@ -2012,11 +2080,11 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         _selectedRoutingSet = 0;
     }
 
-    if ((!useMultipleServer && selectedServerIndex == -1 && selectedCusServerIndex == -1) || (useMultipleServer && outboundCount < 1)) {
+    if (selectedServerIndex == -1 && selectedCusServerIndex == -1) {
         proxyState = false;
-    } else if (!useMultipleServer && selectedCusServerIndex == -1) {
+    } else if (selectedCusServerIndex == -1) {
         useCusProfile = false;
-    } else if (!useMultipleServer && selectedServerIndex == -1) {
+    } else if (selectedServerIndex == -1) {
         useCusProfile = true;
     }
 }
@@ -2266,11 +2334,11 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         [_enableV2rayItem setTitle:@"Unload core"];
         NSImage *icon = [NSImage imageNamed:@"statusBarIcon"];
         [icon setTemplate:YES];
-        [_statusBarItem setImage:icon];
+        _statusBarItem.button.image = icon;
     } else {
         [_v2rayStatusItem setTitle:@"xray-core: unloaded"];
         [_enableV2rayItem setTitle:@"Load core"];
-        [_statusBarItem setImage:[NSImage imageNamed:@"statusBarIcon_disabled"]];
+        _statusBarItem.button.image = [NSImage imageNamed:@"statusBarIcon_disabled"];
     }
     [_pacModeItem setState:proxyMode == pacMode];
     [_manualModeItem setState:proxyMode == manualMode];
@@ -2359,7 +2427,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     
     if (shouldUseXrayTun) {
         dispatch_async(taskQueue, ^{
-            [self syncTunWhitelistRoutes];
             appDebugLog(@"updateSystemProxy defer Xray tun activation to post-spawn path session=%@ lease=%@ helperActive=%d", currentSessionState, currentLeaseId ?: @"", hasHelperSession);
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self updateMenus];
@@ -2374,42 +2441,175 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 // core part
 
-- (IBAction)updateSubscriptions:(id)sender {
-    // sender can be self -> called when app is started
-    // or menuItem -> called by user
-    _subsOutbounds = [[NSMutableArray alloc] init];
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        for (NSString* link in self.subscriptions) {
-            NSDictionary* r = [ConfigImporter importFromHTTPSubscription:link];
-            if (r) {
-                for (ServerProfile* p in r[@"vmess"]) {
-                    [self.subsOutbounds addObject:[p outboundProfile]];
-                }
-                for (ServerProfile* p in r[@"vless"]) {
-                    [self.subsOutbounds addObject:[p outboundProfile]];
-                }
-                [self.subsOutbounds addObjectsFromArray:r[@"other"]];
-            }
+- (void)saveSubscriptionRecords {
+    [SubscriptionStore save:subscriptionRecords key:self.enableEncryption ? self.encryptionKey : nil];
+}
+
+- (void)rebuildSubscriptionOutbounds {
+    NSArray* taken = [[profiles arrayByAddingObjectsFromArray:customOutbounds] valueForKey:@"tag"];
+    NSDictionary* linkByTag;
+    self.subsOutbounds = [SubscriptionStore outbounds:subscriptionRecords links:self.subscriptions takenTags:[NSSet setWithArray:[taken arrayByAddingObjectsFromArray:RESERVED_TAGS]] linkByTag:&linkByTag];
+    subscriptionLinkByTag = linkByTag;
+}
+
+- (BOOL)waitForSubscriptionServers {
+    [self rebuildSubscriptionOutbounds];
+    subscriptionStartupPending = self.subscriptions.count > 0 && [self allSelectableOutbounds].count == 0 && cusProfiles.count == 0;
+    if (subscriptionStartupPending) {
+        _statusBarItem.button.image = [NSImage imageNamed:@"statusBarIcon_disabled"];
+        _v2rayStatusItem.title = @"xray-core: waiting for subscription servers";
+        [self updateServerMenuList];
+    }
+    return subscriptionStartupPending;
+}
+
+- (NSDictionary*)selectedOutbound {
+    NSArray* all = [self allSelectableOutbounds];
+    return selectedServerIndex >= 0 && selectedServerIndex < all.count ? all[selectedServerIndex] : nil;
+}
+
+- (NSDictionary*)selectedSubscriptionRecord {
+    NSString* link = subscriptionLinkByTag[[self selectedOutbound][@"tag"] ?: @""];
+    return link ? subscriptionRecords[link] : nil;
+}
+
+// A full Xray config of the selected subscription server, which brings its own routing.
+- (NSDictionary*)selectedServerConfig {
+    return [self isUsingCustomJSONConfig] ? nil : [self selectedOutbound][@"config"];
+}
+
+// The subscription's routing profile in effect, nil when a manual rule set applies.
+- (NSDictionary*)activeSubscriptionProfile {
+    if (!automaticSubscriptionRouting || [self isUsingCustomJSONConfig] || [self selectedServerConfig]) return nil;
+    return [self selectedSubscriptionRecord][@"profile"];
+}
+
+// A full server config uses the geodata of its subscription's routing profile.
+- (NSString*)currentGeoDirectory {
+    NSString* path = [self activeSubscriptionProfile] || [self selectedServerConfig] ? [self selectedSubscriptionRecord][@"geoDirectory"] : nil;
+    return path && [NSFileManager.defaultManager fileExistsAtPath:path] ? path : [self defaultGeoDirectory];
+}
+
+- (NSString*)defaultGeoDirectory {
+    for (NSString* name in @[@"geoip.dat", @"geosite.dat"]) {
+        if (![NSFileManager.defaultManager fileExistsAtPath:[customCoreDirectory() stringByAppendingPathComponent:name]]) return NSBundle.mainBundle.resourcePath;
+    }
+    return customCoreDirectory();
+}
+
+- (void)updateDefaultGeoData:(NSArray*)rules completion:(void (^)(NSString* failure))completion {
+    NSUInteger proxyPort = proxyState && coreProcessPID > 0 ? httpPort : 0;
+    NSString* core = [self getV2rayPath];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager* files = NSFileManager.defaultManager;
+        NSString* staging = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+        NSError* error;
+        NSString* directory = [SubscriptionRouting downloadGeoData:nil root:staging proxyPort:proxyPort error:&error];
+        BOOL installed = directory && [SubscriptionRouting validateRules:rules dns:nil assets:directory core:core error:&error] &&
+            [files createDirectoryAtPath:customCoreDirectory() withIntermediateDirectories:YES attributes:nil error:&error];
+        for (NSString* name in @[@"geoip.dat", @"geosite.dat"]) {
+            if (!installed) break;
+            NSString* target = [customCoreDirectory() stringByAppendingPathComponent:name];
+            [files removeItemAtPath:target error:nil];
+            installed = [files moveItemAtPath:[directory stringByAppendingPathComponent:name] toPath:target error:&error];
         }
-        // not safe, need to make sure every tag is unique
+        [files removeItemAtPath:staging error:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (sender == self) {
-                [self restoreStartupRuntimeState];
-            } else {
-                [self didChangeStatus:sender];
-            }
+            if (installed && [[self currentGeoDirectory] isEqual:customCoreDirectory()]) [self coreConfigDidChange:self];
+            completion(installed ? nil : error.localizedDescription ?: @"Geodata update failed.");
         });
     });
 }
 
+- (IBAction)updateSubscriptions:(id)sender {
+    [self refreshSubscriptions:YES];
+}
+
+- (void)refreshSubscriptions:(BOOL)force {
+    if (subscriptionUpdateInProgress) {
+        subscriptionForcedRefreshPending = subscriptionForcedRefreshPending || force;
+        return;
+    }
+    subscriptionUpdateInProgress = YES;
+    NSArray* links = [self.subscriptions copy];
+    NSDictionary* previous = subscriptionRecords;
+    NSUInteger proxyPort = proxyState && coreProcessPID > 0 ? httpPort : 0;
+    NSString* core = [self getV2rayPath];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSDictionary* records = [SubscriptionStore refresh:previous links:links force:force proxyPort:proxyPort core:core geoRoot:geoDataRoot()];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->subscriptionUpdateInProgress = NO;
+            if (![records isEqual:previous]) [self applySubscriptionRecords:records previous:previous];
+            if (self->subscriptionStartupPending && ([self allSelectableOutbounds].count || !self.subscriptions.count)) {
+                self->subscriptionStartupPending = NO;
+                [self restoreStartupRuntimeState];
+            }
+            BOOL forced = self->subscriptionForcedRefreshPending;
+            self->subscriptionForcedRefreshPending = NO;
+            if (forced || ![links isEqual:self.subscriptions]) [self refreshSubscriptions:forced];
+        });
+    });
+}
+
+- (void)applySubscriptionRecords:(NSDictionary*)records previous:(NSDictionary*)previous {
+    for (NSString* link in records) {
+        for (NSString* key in @[@"error", @"geoError"]) {
+            NSString* message = records[link][key];
+            NSString* name = records[link][@"title"] ?: @"Subscription";
+            if (message && ![message isEqual:previous[link][key]]) [self appendCoreLogLine:[NSString stringWithFormat:@"%@: %@", name, message]];
+        }
+    }
+    NSString* geoDirectory = [self currentGeoDirectory];
+    NSString* selectedTag = [self selectedOutbound][@"tag"] ?: @"";
+    subscriptionRecords = records;
+    [self saveSubscriptionRecords];
+    [self rebuildSubscriptionOutbounds];
+    NSArray* all = [self allSelectableOutbounds];
+    NSUInteger index = [[all valueForKey:@"tag"] indexOfObject:selectedTag];
+    selectedServerIndex = index != NSNotFound ? (NSInteger)index : MIN(selectedServerIndex, (NSInteger)all.count - 1);
+    [self saveAppStatus];
+    BOOL coreChanged = proxyState && (![geoDirectory isEqual:[self currentGeoDirectory]] || ![v2rayJSONconfig isEqual:[self displayConfigData]]);
+    if (!subscriptionStartupPending && coreChanged) {
+        [self coreConfigDidChange:self];
+    } else {
+        [self updateServerMenuList];
+        [self updateRuleSetMenuList];
+    }
+    [SubscriptionStore removeGeoDataIn:geoDataRoot() unusedBy:records];
+}
+
+- (void)useSubscriptionRouting:(id)sender {
+    if (automaticSubscriptionRouting) return;
+    automaticSubscriptionRouting = YES;
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"automaticSubscriptionRouting"];
+    [self coreConfigDidChange:self];
+}
+
 - (void)updateRuleSetMenuList {
     [_ruleSetMenuList removeAllItems];
+    NSDictionary* record = [self selectedSubscriptionRecord];
+    BOOL fixedRouting = [self isUsingCustomJSONConfig] || [self selectedServerConfig];
+    NSDictionary* profile = fixedRouting ? nil : record[@"profile"];
+    if (fixedRouting) {
+        [_ruleSetMenuList addItemWithTitle:@"Routing from the server config" action:nil keyEquivalent:@""];
+    } else if (profile) {
+        NSString* title = [@"From subscription: " stringByAppendingString:[SubscriptionRouting routingFromProfile:profile][@"name"]];
+        [_ruleSetMenuList addItemWithTitle:title action:@selector(useSubscriptionRouting:) keyEquivalent:@""].state = automaticSubscriptionRouting;
+    }
+    for (NSString* message in @[record[@"error"] ?: @"", record[@"geoError"] ?: @""]) {
+        if (!message.length) continue;
+        NSString* firstLine = [message componentsSeparatedByString:@"\n"].firstObject;
+        NSMenuItem* item = [_ruleSetMenuList addItemWithTitle:firstLine.length > 70 ? [[firstLine substringToIndex:70] stringByAppendingString:@"..."] : firstLine action:nil keyEquivalent:@""];
+        item.indentationLevel = 1;
+        item.toolTip = message;
+    }
+    if (_ruleSetMenuList.numberOfItems) [_ruleSetMenuList addItem:NSMenuItem.separatorItem];
+    BOOL profileActive = [self activeSubscriptionProfile] != nil;
     NSInteger i = 0;
     for (NSDictionary* rule in _routingRuleSets) {
-        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:rule[@"name"] action:@selector(switchRoutingSet:) keyEquivalent:@""];
+        NSMenuItem* item = [_ruleSetMenuList addItemWithTitle:rule[@"name"] action:fixedRouting ? nil : @selector(switchRoutingSet:) keyEquivalent:@""];
         item.tag = i;
-        item.state = i == _selectedRoutingSet;
-        [_ruleSetMenuList addItem:item];
+        item.state = i == _selectedRoutingSet && !profileActive && !fixedRouting;
         i += 1;
     }
 }
@@ -2428,11 +2628,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
             NSString *itemTitle = nilCoalescing(p[@"tag"], @"");
             NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:itemTitle action:@selector(switchServer:) keyEquivalent:@""];
             [newItem setTag:i];
-            if (useMultipleServer){
-                newItem.state = 0;
-            } else {
-                newItem.state = (!useCusProfile && i == selectedServerIndex);
-            }
+            newItem.state = !useCusProfile && i == selectedServerIndex;
             [_serverListMenu addItem:newItem];
             i += 1;
         }
@@ -2440,31 +2636,28 @@ static int normalizedExitCodeFromWaitStatus(int status) {
             NSString *itemTitle = nilCoalescing(p[@"tag"], @"custom outbound");
             NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:itemTitle action:@selector(switchServer:) keyEquivalent:@""];
             [newItem setTag:i];
-            if (useMultipleServer){
-                newItem.state = 0;
-            } else {
-                newItem.state = (!useCusProfile && i == selectedServerIndex);
-            }
+            newItem.state = !useCusProfile && i == selectedServerIndex;
             [_serverListMenu addItem:newItem];
             i += 1;
         }
+        NSString* lastLink;
         for (NSDictionary* p in _subsOutbounds) {
+            NSString* link = subscriptionLinkByTag[p[@"tag"]];
+            if (![link isEqual:lastLink]) {
+                lastLink = link;
+                if (_serverListMenu.numberOfItems) [_serverListMenu addItem:[NSMenuItem separatorItem]];
+                NSMenuItem* header = [_serverListMenu addItemWithTitle:subscriptionRecords[link][@"title"] ?: @"Subscription" action:nil keyEquivalent:@""];
+                header.toolTip = subscriptionRecords[link][@"announce"];
+            }
             NSString *itemTitle = nilCoalescing(p[@"tag"], @"from subscription");
             NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:itemTitle action:@selector(switchServer:) keyEquivalent:@""];
+            NSDictionary* meta = p[@"config"][@"meta"];
+            id description = [meta isKindOfClass:NSDictionary.class] ? meta[@"serverDescription"] : nil;
+            if ([description isKindOfClass:NSString.class]) newItem.toolTip = description;
             [newItem setTag:i];
-            if (useMultipleServer){
-                newItem.state = 0;
-            } else {
-                newItem.state = (!useCusProfile && i == selectedServerIndex);
-            }
+            newItem.state = !useCusProfile && i == selectedServerIndex;
             [_serverListMenu addItem:newItem];
             i += 1;
-        }
-        if([profiles count] + [customOutbounds count] + [_subsOutbounds count]> 0) {
-            NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:@"Use All" action:@selector(switchServer:) keyEquivalent:@""];
-            [newItem setTag:kUseAllServer];
-            newItem.state = useMultipleServer & !useCusProfile;
-            [_serverListMenu addItem:newItem];
         }
         if (_subscriptions.count > 0) {
             [_serverListMenu addItem:[NSMenuItem separatorItem]];
@@ -2477,11 +2670,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
             NSString *itemTitle = [[cusProfilePath componentsSeparatedByString:@"/"] lastObject];
             NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:itemTitle action:@selector(switchServer:) keyEquivalent:@""];
             [newItem setTag:i];
-            if (useMultipleServer){
-                newItem.state = 0;
-            } else {
-                newItem.state = (useCusProfile && i - [profiles count] - [customOutbounds count] - [_subsOutbounds count] == selectedCusServerIndex)? 1 : 0;
-            }
+            newItem.state = useCusProfile && i - [profiles count] - [customOutbounds count] - [_subsOutbounds count] == selectedCusServerIndex;
             [_serverListMenu addItem:newItem];
             i += 1;
         }
@@ -2494,7 +2683,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     BOOL shouldRefreshTunSession = [self shouldMaintainTunRoutingSession];
     if (proxyState == true) {
         v2rayJSONconfig = [self displayConfigData] ?: [[NSData alloc] init];
-        //[self generateLaunchdPlist:plistPath];
         [self toggleCore];
         if (shouldRefreshTunSession && !suppressAutomaticTunRefreshDuringCoreConfigChange) {
             [self refreshTunRoutingSession];
@@ -2506,13 +2694,9 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 -(void)toggleCore {
     [self unloadV2ray];
+    // The helper keeps the Xray tun session after the core exits, and the next core needs a new lease.
+    if ([self isUsingXrayTunMode] && [self shouldTreatTunSessionAsActive]) [self stopTunRoutingSession];
     dispatch_semaphore_signal(coreLoopSemaphore);
-//    dispatch_async(taskQueue, ^{
-//        runCommandLine(@"/bin/launchctl",  @[@"unload", self->plistPath]);
-//        runCommandLine(@"/bin/cp", @[@"/dev/null", [NSString stringWithFormat:@"%@/access.log", self->logDirPath]]);
-//        runCommandLine(@"/bin/cp", @[@"/dev/null", [NSString stringWithFormat:@"%@/error.log", self->logDirPath]]);
-//        runCommandLine(@"/bin/launchctl",  @[@"load", self->plistPath]);
-//    });
 }
 
 - (IBAction)showConfigWindow:(id)sender {
@@ -2544,26 +2728,27 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 }
 
 -(IBAction)switchRoutingSet:(id)sender {
+    BOOL overridesProfile = [self activeSubscriptionProfile] != nil;
+    if (!overridesProfile && _selectedRoutingSet == [sender tag]) return;
+    if (overridesProfile) {
+        automaticSubscriptionRouting = NO;
+        [NSUserDefaults.standardUserDefaults setBool:NO forKey:@"automaticSubscriptionRouting"];
+    }
     _selectedRoutingSet = [sender tag];
     [self coreConfigDidChange:self];
     [self saveAppStatus];
 }
 
 - (void)switchServer:(id)sender {
+    if (!useCusProfile && [sender tag] == selectedServerIndex) return;
     NSInteger outboundCount = [profiles count] + [customOutbounds count] + [_subsOutbounds count];
     if ([sender tag] >= 0 && [sender tag] < outboundCount) {
-        [self setUseMultipleServer:NO];
         [self setUseCusProfile:NO];
         [self setSelectedServerIndex:[sender tag]];
     } else if ([sender tag] >= outboundCount && [sender tag] < outboundCount + [cusProfiles count]) {
-        [self setUseMultipleServer:NO];
         [self setUseCusProfile:YES];
         [self setSelectedCusServerIndex:[sender tag] - outboundCount];
-    } else if ([sender tag] == kUseAllServer) {
-        [self setUseMultipleServer:YES];
-        [self setUseCusProfile:NO];
     }
-    NSLog(@"use cus pro:%hhd, select %ld, select cus %ld", useCusProfile, (long)selectedServerIndex, selectedCusServerIndex);
     [self coreConfigDidChange:self];
     [self saveAppStatus];
 }
@@ -2582,14 +2767,10 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         [[NSFileManager defaultManager] removeItemAtPath:coreConfigPath error:nil];
         coreConfigPath = nil;
     }
-//    dispatch_async(taskQueue, ^{
-//        runCommandLine(@"/bin/launchctl", @[@"unload", self->plistPath]);
-//        NSLog(@"V2Ray core unloaded.");
-//    });
 }
 
 - (BOOL)isUsingCustomJSONConfig {
-    return !useMultipleServer && useCusProfile && selectedCusServerIndex >= 0 && selectedCusServerIndex < cusProfiles.count;
+    return useCusProfile && selectedCusServerIndex >= 0 && selectedCusServerIndex < cusProfiles.count;
 }
 
 - (NSData*)runtimeCoreConfigData {
@@ -2605,141 +2786,101 @@ static int normalizedExitCodeFromWaitStatus(int status) {
         return [NSData dataWithContentsOfFile:cusProfiles[selectedCusServerIndex]];
     }
     NSDictionary* fullConfig = [self managedRuntimeConfigObject];
-    return fullConfig != nil ? [NSJSONSerialization dataWithJSONObject:fullConfig options:NSJSONWritingPrettyPrinted error:nil] : nil;
+    return fullConfig != nil ? [NSJSONSerialization dataWithJSONObject:fullConfig options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil] : nil;
 }
 
-- (NSDictionary*)generateConfigFile {
-    return [self managedRuntimeConfigObject];
+- (NSString*)physicalOutboundInterface {
+    // The system's primary interface follows network changes; the helper's copy dates from the start of the tun session.
+    return primaryNetworkInterface() ?: physicalInterface(helperTunSessionStatus[@"defaultInterfaceV4"]);
 }
 
 - (NSDictionary*)managedRuntimeConfigObject {
-    NSMutableDictionary* fullConfig = [NSMutableDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:@"config-sample_new" ofType:@"plist"]];
+    NSDictionary* selected = [self selectedOutbound];
+    if (!selected) return nil;
+    NSMutableDictionary* fullConfig = selected[@"config"] ? [SubscriptionRouting runtimeConfigFromServerConfig:selected[@"config"]] : [self runtimeConfigWithMainTag:selected[@"tag"]];
     fullConfig[@"log"] = @{
                            @"access": [NSString stringWithFormat:@"%@/access.log", logDirPath],
                            @"error": [NSString stringWithFormat:@"%@/error.log", logDirPath],
                            @"loglevel": logLevel
                            };
-    fullConfig[@"inbounds"][0][@"port"] = @(localPort);
-    fullConfig[@"inbounds"][0][@"listen"] = shareOverLan ? @"0.0.0.0" : @"127.0.0.1";
-    fullConfig[@"inbounds"][0][@"settings"][@"udp"] = [NSNumber numberWithBool:udpSupport];
-    fullConfig[@"inbounds"][1][@"port"] = @(httpPort);
-    fullConfig[@"inbounds"][1][@"listen"] = shareOverLan ? @"0.0.0.0" : @"127.0.0.1";
-    BOOL shouldAppendTunInbound = proxyMode == tunMode && self.useXrayTun && [self currentCoreSupportsXrayTun];
-    if (shouldAppendTunInbound) {
-        NSMutableArray* inbounds = [fullConfig[@"inbounds"] mutableCopy];
-        if (inbounds == nil) {
-            inbounds = [[NSMutableArray alloc] init];
-        }
-        NSString* tunName = [self currentTunInterfaceName];
+    fullConfig[@"dns"] = fullConfig[@"dns"] ?: @{@"servers": dnsString.length ? [dnsString componentsSeparatedByString:@","] : @[@"localhost"]};
+    NSString* tunName = nil;
+    if ([self isUsingXrayTunMode]) {
+        tunName = [self currentTunInterfaceName];
         if (![tunName isKindOfClass:[NSString class]] || tunName.length == 0) {
             tunName = [self availableUtunName];
         }
-        [inbounds addObject:[@{
-            @"port": @0,
-            @"protocol": @"tun",
-            @"settings": @{
-                @"name": tunName,
-                @"MTU": @1500
-            }
-        } mutableCopy]];
-        fullConfig[@"inbounds"] = inbounds;
     }
-    
-    NSArray* dnsArray = [dnsString componentsSeparatedByString:@","];
-    if ([dnsArray count] > 0) {
-        fullConfig[@"dns"][@"servers"] = dnsArray;
-    } else {
-        fullConfig[@"dns"][@"servers"] = @[@"localhost"];
-    }
-    
-    // deal with outbound
-    NSMutableDictionary* configOutboundDict = [[NSMutableDictionary alloc] init];
-    NSMutableDictionary* allUniqueTagOutboundDict = [[NSMutableDictionary alloc] init]; // make sure tag is unique
-    NSArray* allOutbounds = [self allSelectableOutbounds];
-    for (NSDictionary* outbound in profiles) {
-        allUniqueTagOutboundDict[outbound[@"tag"]] = [outbound mutableDeepCopy];
-    }
-    for (NSDictionary* outbound in customOutbounds) {
-        allUniqueTagOutboundDict[outbound[@"tag"]] = [outbound mutableDeepCopy];
-    }
-    for (NSDictionary* outbound in _subsOutbounds) {
-        allUniqueTagOutboundDict[outbound[@"tag"]] = [outbound mutableDeepCopy];
-    }
-    NSArray* allProxyTags = allUniqueTagOutboundDict.allKeys;
-    allUniqueTagOutboundDict[@"direct"] = OUTBOUND_DIRECT;
-    allUniqueTagOutboundDict[@"decline"] = OUTBOUND_DECLINE;
-    
-    fullConfig[@"routing"] = [_routingRuleSets[_selectedRoutingSet] mutableDeepCopy];
-    if (!useMultipleServer) {
-        // replace tag main with current selected outbound tag
-        NSString* currentMainTag = allOutbounds[selectedServerIndex][@"tag"];
-        for (NSMutableDictionary* aRule in fullConfig[@"routing"][@"rules"]) {
-            if ([@"main" isEqualToString:aRule[@"outboundTag"]]) {
-                aRule[@"outboundTag"] = currentMainTag;
-            }
+    // tun2socks hands UDP, DNS included, to the socks inbound, so tun mode needs UDP whatever the setting says.
+    fullConfig[@"inbounds"] = [SubscriptionRouting inboundsWithSocksPort:localPort httpPort:httpPort listen:shareOverLan ? @"0.0.0.0" : @"127.0.0.1" udp:udpSupport || proxyMode == tunMode tunName:tunName fakeDNS:usesFakeDNS(fullConfig[@"dns"])];
+    if (proxyMode == tunMode && ![self isUsingXrayTunMode]) {
+        NSString* interface = [self physicalOutboundInterface];
+        // With no network there is nothing to bind to; networkMayHaveChanged rebuilds the config once there is.
+        if (!interface) return nil;
+        for (NSMutableDictionary* outbound in fullConfig[@"outbounds"]) {
+            if (![outbound isKindOfClass:NSDictionary.class] || [outbound[@"protocol"] isEqual:@"blackhole"]) continue;
+            NSMutableDictionary* stream = [outbound[@"streamSettings"] isKindOfClass:NSDictionary.class] ? [outbound[@"streamSettings"] mutableDeepCopy] : [NSMutableDictionary dictionary];
+            NSMutableDictionary* socket = [stream[@"sockopt"] isKindOfClass:NSDictionary.class] ? [stream[@"sockopt"] mutableCopy] : [NSMutableDictionary dictionary];
+            socket[@"interface"] = interface;
+            // Without it Xray leaves the downloadSettings leg of XHTTP unbound.
+            socket[@"penetrate"] = @YES;
+            stream[@"sockopt"] = socket;
+            outbound[@"streamSettings"] = stream;
         }
-    } else {
-        // replace outbound tag main with balancetag
-        for (NSMutableDictionary* aRule in fullConfig[@"routing"][@"rules"]) {
-            if ([@"main" isEqualToString:aRule[@"outboundTag"]]) {
-                [aRule removeObjectForKey:@"outboundTag"];
-                [aRule setObject:@"balance" forKey:@"balancerTag"];
-            }
-        }
-        
+    }
+    return fullConfig;
+}
+
+- (NSMutableDictionary*)runtimeConfigWithMainTag:(NSString*)mainTag {
+    NSDictionary* profile = [self activeSubscriptionProfile];
+    NSDictionary* routing = profile ? [SubscriptionRouting routingFromProfile:profile] : _routingRuleSets[_selectedRoutingSet];
+    NSDictionary* profileDNS = [SubscriptionRouting dnsFromProfile:profile];
+    NSMutableDictionary* fullConfig = [NSMutableDictionary dictionary];
+    fullConfig[@"dns"] = [profileDNS mutableDeepCopy];
+    fullConfig[@"routing"] = [routing mutableDeepCopy];
+
+    NSMutableDictionary* outboundsByTag = [NSMutableDictionary dictionary];
+    for (NSDictionary* outbound in [self allSelectableOutbounds]) {
+        if (!outbound[@"config"]) outboundsByTag[outbound[@"tag"]] = outbound;
+    }
+    NSMutableDictionary* direct = [OUTBOUND_DIRECT mutableDeepCopy];
+    if (profileDNS || [@[@"IPIfNonMatch", @"IPOnDemand"] containsObject:routing[@"domainStrategy"]]) {
+        // Use the same resolver for the direct connection as for the IP routing decision.
+        direct[@"streamSettings"] = @{@"sockopt": @{@"domainStrategy": @"ForceIP"}};
+    }
+    outboundsByTag[@"direct"] = direct;
+    outboundsByTag[@"decline"] = OUTBOUND_DECLINE;
+
+    NSMutableArray* rules = fullConfig[@"routing"][@"rules"];
+    if (profileDNS) {
+        // Queries sent to port 53 go to the profile's resolvers.
+        [rules insertObject:[@{@"type": @"field", @"inboundTag": APP_INBOUND_TAGS, @"port": @"53", @"outboundTag": @"__v2rayxs_dns__"} mutableCopy] atIndex:0];
+        outboundsByTag[@"__v2rayxs_dns__"] = @{@"tag": @"__v2rayxs_dns__", @"protocol": @"dns"};
+    }
+    for (NSMutableDictionary* rule in rules) {
+        if ([@"main" isEqualToString:rule[@"outboundTag"]]) rule[@"outboundTag"] = mainTag;
     }
 
-    // NSLog(@"%@", allOutbounds);
-    BOOL usebalance = false;
-    for (NSDictionary* rule in fullConfig[@"routing"][@"rules"]) {
-        if (rule[@"balancerTag"] && !rule[@"outboundTag"]) {
-            // if any rule uses balancer, stop the loop and add a balancer to the routing part
-            usebalance = true;
-            break;
-        } else {
-            // pick up all mentioned outbounds in the routing rule set
-            if (allUniqueTagOutboundDict[rule[@"outboundTag"]]) {
-                configOutboundDict[rule[@"outboundTag"]] = allUniqueTagOutboundDict[rule[@"outboundTag"]];
-            }
-        }
+    // A catch-all last rule always matches, so IPIfNonMatch would never resolve
+    // domains for ip rules. Drop it and make its outbound the first one, which
+    // Xray uses for traffic that matches no rule.
+    NSDictionary* lastRule = rules.lastObject;
+    NSString* defaultTag = mainTag;
+    if ([@"0-65535" isEqualToString:lastRule[@"port"]] && outboundsByTag[lastRule[@"outboundTag"]] && [[NSSet setWithArray:lastRule.allKeys] isSubsetOfSet:[NSSet setWithArray:@[@"type", @"port", @"outboundTag"]]]) {
+        defaultTag = lastRule[@"outboundTag"];
+        [rules removeLastObject];
+    }
+    NSMutableOrderedSet* usedTags = [NSMutableOrderedSet orderedSetWithObject:defaultTag];
+    for (NSDictionary* rule in rules) {
+        if (outboundsByTag[rule[@"outboundTag"]]) [usedTags addObject:rule[@"outboundTag"]];
     }
     BOOL rejectsTLSAllowInsecure = [self currentCoreRejectsTLSAllowInsecure];
     BOOL rejectsLegacyKCP = [self currentCoreRejectsLegacyKCP];
-    if (usebalance) {
-        // if balancer is used, add all outbounds into config file, and add all tags to the balancer selector
-        fullConfig[@"routing"][@"balancers"] = @[@{
-                                                     @"tag":@"balance",
-                                                     @"selector": allProxyTags
-                                                     }];
-        NSMutableArray* normalizedOutbounds = [[NSMutableArray alloc] init];
-        for (NSDictionary* outbound in allUniqueTagOutboundDict.allValues) {
-            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:outbound rejectsAllowInsecure:rejectsTLSAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP];
-            [normalizedOutbounds addObject:normalizedOutbound];
-        }
-        fullConfig[@"outbounds"] = normalizedOutbounds;
-    } else {
-        // A catch-all last rule always matches, so IPIfNonMatch would never resolve
-        // domains for ip rules. Drop it and make its outbound the first one, which
-        // Xray uses for traffic that matches no rule.
-        NSMutableArray* rules = fullConfig[@"routing"][@"rules"];
-        NSDictionary* lastRule = rules.lastObject;
-        NSString* defaultTag = nil;
-        NSSet* catchAllKeys = [NSSet setWithArray:@[@"type", @"port", @"outboundTag"]];
-        if ([@"0-65535" isEqualToString:lastRule[@"port"]] && configOutboundDict[lastRule[@"outboundTag"]] && [[NSSet setWithArray:lastRule.allKeys] isSubsetOfSet:catchAllKeys]) {
-            defaultTag = lastRule[@"outboundTag"];
-            [rules removeLastObject];
-        }
-        NSMutableArray* normalizedOutbounds = [[NSMutableArray alloc] init];
-        for (NSString* tag in configOutboundDict) {
-            NSMutableDictionary* normalizedOutbound = [self runtimeOutboundFromStoredOutbound:configOutboundDict[tag] rejectsAllowInsecure:rejectsTLSAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP];
-            if ([tag isEqualToString:defaultTag]) {
-                [normalizedOutbounds insertObject:normalizedOutbound atIndex:0];
-            } else {
-                [normalizedOutbounds addObject:normalizedOutbound];
-            }
-        }
-        fullConfig[@"outbounds"] = normalizedOutbounds;
+    NSMutableArray* outbounds = [NSMutableArray array];
+    for (NSString* tag in usedTags) {
+        [outbounds addObject:[self runtimeOutboundFromStoredOutbound:outboundsByTag[tag] rejectsAllowInsecure:rejectsTLSAllowInsecure rejectsLegacyKCP:rejectsLegacyKCP]];
     }
+    fullConfig[@"outbounds"] = outbounds;
     return fullConfig;
 }
 
@@ -2750,14 +2891,6 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     [outbounds addObjectsFromArray:_subsOutbounds ?: @[]];
     return outbounds;
 }
-
-//-(void)generateLaunchdPlist:(NSString*)path {
-//    NSString* v2rayPath = [self getV2rayPath];
-//    NSLog(@"use core: %@", v2rayPath);
-//    NSString *configPath = [NSString stringWithFormat:@"http://127.0.0.1:%d/config.json", webServerPort];
-//    NSDictionary *runPlistDic = [[NSDictionary alloc] initWithObjects:@[@"v2rayproject.v2rayx.v2ray-core", @[v2rayPath, @"-config", configPath], [NSNumber numberWithBool:YES]] forKeys:@[@"Label", @"ProgramArguments", @"RunAtLoad"]];
-//    [runPlistDic writeToFile:path atomically:NO];
-//}
 
 -(NSString*)getV2rayPath {
     NSString* defaultV2ray = [NSString stringWithFormat:@"%@/xray", [[NSBundle mainBundle] resourcePath]];
@@ -2995,7 +3128,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
 
 - (IBAction)viewLog:(id)sender {
     if (!useCusProfile) {
-        [[NSWorkspace sharedWorkspace] openFile:logDirPath];
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:logDirPath]];
     } else {
         NSString* customConfigPath = selectedCusServerIndex >= 0 && selectedCusServerIndex < cusProfiles.count ? cusProfiles[selectedCusServerIndex] : @"Unknown custom config path";
         NSAlert *alert = [[NSAlert alloc] init];
@@ -3008,7 +3141,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
     if (!useCusProfile) {
         [[NSPasteboard generalPasteboard] clearContents];
         NSString* command = [NSString stringWithFormat:@"export http_proxy=\"http://127.0.0.1:%ld\"; export HTTP_PROXY=\"http://127.0.0.1:%ld\"; export https_proxy=\"http://127.0.0.1:%ld\"; export HTTPS_PROXY=\"http://127.0.0.1:%ld\"", httpPort, httpPort, httpPort, httpPort];
-        [[NSPasteboard generalPasteboard] setString:command forType:NSStringPboardType];
+        [[NSPasteboard generalPasteboard] setString:command forType:NSPasteboardTypeString];
     } else {
         NSString* customConfigPath = selectedCusServerIndex >= 0 && selectedCusServerIndex < cusProfiles.count ? cusProfiles[selectedCusServerIndex] : @"Unknown custom config path";
         NSAlert *alert = [[NSAlert alloc] init];
@@ -3168,5 +3301,4 @@ int runCommandLine(NSString* launchPath, NSArray* arguments) {
 @synthesize cusProfiles;
 @synthesize useCusProfile;
 @synthesize selectedCusServerIndex;
-@synthesize useMultipleServer;
 @end

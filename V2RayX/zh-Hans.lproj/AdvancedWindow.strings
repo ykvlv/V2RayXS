@@ -2,8 +2,8 @@
 /* Class = "NSTextFieldCell"; title = "WARNING: this function is still in beta. Backup before you try!"; ObjectID = "0s7-uP-t1h"; */
 "0s7-uP-t1h.title" = "警告: 本功能尚在测试中，请注意备份配置！";
 
-/* Class = "NSTextFieldCell"; title = "Make sure the following files are present:"; ObjectID = "1Vl-aE-8sN"; */
-"1Vl-aE-8sN.title" = "确保以下文件存在:";
+/* Class = "NSTextFieldCell"; title = "V2RayXS uses these files from the folder:"; ObjectID = "1Vl-aE-8sN"; */
+"1Vl-aE-8sN.title" = "V2RayXS 使用此目录中的以下文件:";
 
 /* Class = "NSMenuItem"; title = "Item 1"; ObjectID = "2Oy-Qp-IeQ"; */
 "2Oy-Qp-IeQ.title" = "Item 1";
@@ -56,8 +56,8 @@
 /* Class = "NSButtonCell"; title = "Domain"; ObjectID = "FXd-hg-kTV"; */
 "FXd-hg-kTV.title" = "域名";
 
-/* Class = "NSTextFieldCell"; title = "When an incoming connection matches ALL the criterions (domain/ip/port/network), it will be routed to the provided outbound tag. \n\nFour preset tags:\n   main: the outbound users choose from the menu list \"Server\"\ndecline: the connection will be closed.\n direct: incoming traffic will be send to its real destination.\nbalance: v2ray will randomly pickup an outbound from all \n         provided outbounds."; ObjectID = "GeG-md-J3l"; */
-"GeG-md-J3l.title" = "当传入连接符合所有规则时(domain/ip/port/network), 将会被转发至所选路由. \n\n路由规则介绍:\n   main: 转发至用户在主菜单中所选择的服务器。\ndecline: 拒绝连接。\n direct: 直接连接\nbalance: 在列表中随机选择可用的服务器";
+/* Class = "NSTextFieldCell"; title = "When an incoming connection matches ALL the criterions (domain/ip/port/network), it will be routed to the provided outbound tag. \n\nThree preset tags:\n   main: the outbound users choose from the menu list \"Server\"\ndecline: the connection will be closed.\n direct: incoming traffic will be send to its real destination."; ObjectID = "GeG-md-J3l"; */
+"GeG-md-J3l.title" = "当传入连接符合所有规则时(domain/ip/port/network), 将会被转发至所选路由. \n\n路由规则介绍:\n   main: 转发至用户在主菜单中所选择的服务器。\ndecline: 拒绝连接。\n direct: 直接连接";
 
 /* Class = "NSTextFieldCell"; title = "Label"; ObjectID = "GuH-9u-diX"; */
 "GuH-9u-diX.title" = "Label";
@@ -80,8 +80,8 @@
 /* Class = "NSMenuItem"; title = "Item 3"; ObjectID = "PNJ-mc-Nhk"; */
 "PNJ-mc-Nhk.title" = "Item 3";
 
-/* Class = "NSTextFieldCell"; title = "v2ray-core/v2ray\nv2ray-core/v2ctl\nv2ray-core/geoip.dat\nv2ray-core/geosite.dat"; ObjectID = "QCH-HC-h7v"; */
-"QCH-HC-h7v.title" = "v2ray-core/v2ray\nv2ray-core/v2ctl\nv2ray-core/geoip.dat\nv2ray-core/geosite.dat";
+/* Class = "NSTextFieldCell"; title = "xray, geoip.dat, geosite.dat: own core with own geodata\ngeoip.dat, geosite.dat: own geodata with the bundled core"; ObjectID = "QCH-HC-h7v"; */
+"QCH-HC-h7v.title" = "xray、geoip.dat、geosite.dat：自定义核心及 geodata\ngeoip.dat、geosite.dat：自定义 geodata，使用内置核心";
 
 /* Class = "NSWindow"; title = "Window"; ObjectID = "QvC-M9-y7g"; */
 "QvC-M9-y7g.title" = "Window";
@@ -98,8 +98,8 @@
 /* Class = "NSTextFieldCell"; title = "When ALL the following criteria are satisfied:"; ObjectID = "ZeT-4k-vxH"; */
 "ZeT-4k-vxH.title" = "满足所有以下条件时:";
 
-/* Class = "NSTextFieldCell"; title = "V2RayX is shipped with a v2ray binary file in the app bundle. If anyone wants to use a different v2ray core binary, put the binary file in the following directory:"; ObjectID = "a4D-MW-Gqf"; */
-"a4D-MW-Gqf.title" = "V2RayX 已经附带了v2ray core，如果想使用其它版本，请将文件放入以下目录中:";
+/* Class = "NSTextFieldCell"; title = "V2RayXS ships Xray and geodata in the app bundle. To use your own, put the files in this folder:"; ObjectID = "a4D-MW-Gqf"; */
+"a4D-MW-Gqf.title" = "V2RayXS 在应用包中附带了 Xray 和 geodata。如需使用自己的文件，请放入以下目录:";
 
 /* Class = "NSButtonCell"; title = "Port"; ObjectID = "aZy-cf-V3d"; */
 "aZy-cf-V3d.title" = "端口";
@@ -173,8 +173,8 @@
 /* Class = "NSTabViewItem"; label = "Configs"; ObjectID = "kZw-NT-AZ4"; */
 "kZw-NT-AZ4.label" = "配置";
 
-/* Class = "NSTextFieldCell"; title = "Otherwise V2RayX will still use default v2ray core binaries. \nCompatibility is not guaranteed."; ObjectID = "ldu-SF-fOd"; */
-"ldu-SF-fOd.title" = "否则V2rayX仍将使用默认的v2ray core.\n替换它将不会保证兼容性，请慎重";
+/* Class = "NSButtonCell"; title = "Update Geodata"; ObjectID = "gD4-Up-cLl"; */
+"gD4-Up-cLl.title" = "更新 Geodata";
 
 /* Class = "NSComboBoxCell"; m0j-kv-PFY.ibShadowedObjectValues[0] = "Item 1"; ObjectID = "m0j-kv-PFY"; */
 "m0j-kv-PFY.ibShadowedObjectValues[0]" = "Item 1";

@@ -1,7 +1,7 @@
 DerivedData/
 .DS_Store
-V2RayX.xcodeproj/project.xcworkspace
-V2RayX.xcodeproj/xcuserdata/
+V2RayXS.xcodeproj/project.xcworkspace
+V2RayXS.xcodeproj/xcuserdata/
 build/
 v2ray-core-bin/
 xray-core-bin/

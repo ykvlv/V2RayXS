@@ -16,10 +16,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSDictionary*)allocateTunFDWithPreferredName:(nullable NSString*)preferredName error:(NSString* _Nullable * _Nullable)errorMessage;
 - (BOOL)disableSystemProxyWithAction:(NSString*)action;
 - (BOOL)restoreSystemProxyWithAction:(NSString*)action;
-- (nullable NSDictionary*)startEmbeddedTunWithLocalPort:(NSInteger)localPort action:(NSString*)action;
+// serverDomains keep the network's resolvers while the session points the system resolver into the tunnel.
+- (nullable NSDictionary*)startEmbeddedTunWithLocalPort:(NSInteger)localPort serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action;
 - (nullable NSDictionary*)tunStatusWithAction:(NSString*)action;
-- (nullable NSDictionary*)activateTunLeaseSynchronouslyWithLeaseId:(nullable NSString*)leaseId action:(NSString*)action;
-- (nullable NSDictionary*)activateTunWithLeaseId:(nullable NSString*)leaseId action:(NSString*)action;
+- (nullable NSDictionary*)activateTunLeaseSynchronouslyWithLeaseId:(nullable NSString*)leaseId serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action;
+- (nullable NSDictionary*)activateTunWithLeaseId:(nullable NSString*)leaseId serverDomains:(NSArray<NSString*>*)serverDomains action:(NSString*)action;
 - (nullable NSDictionary*)deactivateTunWithLeaseId:(nullable NSString*)leaseId action:(NSString*)action;
 - (nullable NSDictionary*)stopTunWithAction:(NSString*)action;
 - (nullable NSDictionary*)syncRouteWhitelistAtPath:(NSString*)path action:(NSString*)action;

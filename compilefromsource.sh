@@ -56,7 +56,7 @@ if [[ ! -f /Applications/Xcode.app/Contents/MacOS/Xcode ]]; then
 else
     echo -e "${BOLD}-- Downloading source code --${NORMAL}"
     echo -e "${BOLD}-- 正在下载源码 --${NORMAL}"
-    git clone --recursive https://github.com/tzmax/V2RayXS.git "V2RayXS${datetime}"
+    git clone --recursive https://github.com/ykvlv/V2RayXS.git "V2RayXS${datetime}"
     cd "V2RayXS${datetime}"
     echo -e "${BOLD}-- Start building V2RayXS --${NORMAL}"
     echo -e "${BOLD}-- 开始编译 V2RayXS --${NORMAL}"

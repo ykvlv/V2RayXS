@@ -17,20 +17,14 @@
 /* Class = "NSTextFieldCell"; title = "seperated by comma(,)"; ObjectID = "5N8-C0-QJV"; */
 "5N8-C0-QJV.title" = "请使用英文逗号(,)分割";
 
-/* Class = "NSMenuItem"; title = "Import from other links..."; ObjectID = "8rA-16-mml"; */
-"8rA-16-mml.title" = "使用其它协议的URL导入...";
-
 /* Class = "NSMenuItem"; title = "aes-128-gcm"; ObjectID = "92F-Fh-RHW"; */
 "92F-Fh-RHW.title" = "aes-128-gcm";
 
-/* Class = "NSMenuItem"; title = "Import from standard share links..."; ObjectID = "CTZ-Lq-X8f"; */
-"CTZ-Lq-X8f.title" = "使用标准ss或vmess协议的URL导入...";
+/* Class = "NSMenuItem"; title = "Import from link or subscription URL..."; ObjectID = "CTZ-Lq-X8f"; */
+"CTZ-Lq-X8f.title" = "从链接或订阅 URL 导入...";
 
 /* Class = "NSTextFieldCell"; title = "Network:"; ObjectID = "Dkz-gS-91s"; */
 "Dkz-gS-91s.title" = "协议:";
-
-/* Class = "NSMenuItem"; title = "Import from pastboard..."; ObjectID = "EQb-nS-Lf9"; */
-"EQb-nS-Lf9.title" = "从剪贴板导入...";
 
 /* Class = "NSTextFieldCell"; title = "Label"; ObjectID = "Eo2-Yu-0N0"; */
 "Eo2-Yu-0N0.title" = "Label";

@@ -11,6 +11,7 @@
 #import "TransportWindowController.h"
 #import "AdvancedWindowController.h"
 #import "ConfigImporter.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @interface ConfigWindowController ()
 
@@ -297,7 +298,8 @@
     _appDelegate.useXrayTun = self.useXrayTun;
     _appDelegate.encryptionKey = self.encryptionKey;
     [_appDelegate saveConfigInfo];
-    [_appDelegate updateSubscriptions:self];
+    if (![_appDelegate waitForSubscriptionServers]) [_appDelegate didChangeStatus:self];
+    [_appDelegate refreshSubscriptions:NO];
     [[self window] close];
 }
 
@@ -360,33 +362,47 @@
     }];
 }
 
-- (IBAction)importFromStandardLink:(id)sender {
-    [self askInputWithPrompt:@"Support standard vmess:// and ss:// link. Standard vmess:// link is still under discussion. Use \"Import from other links...\" to import other links, for example, vmess:// invented by v2rayN." handler:^(NSString *inputStr) {
-        if (inputStr.length) {
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-                ServerProfile* standardProfile = [ConfigImporter importFromXrayShareLink:inputStr];
-                if (standardProfile) {
-                    [self.profiles addObject:standardProfile];
-                    [self presentImportResultOfVmessCount:1 otherCount:0 ruleSetCount:0];
+- (IBAction)importFromLinks:(id)sender {
+    [self askInputWithPrompt:@"Paste a subscription URL or a vless://, vmess://, ss:// or ssd:// link." handler:^(NSString *inputStr) {
+        inputStr = [inputStr stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!inputStr.length) return;
+        NSUInteger proxyPort = self.appDelegate.proxyState ? self.appDelegate.httpPort : 0;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSMutableDictionary* result = [ConfigImporter importFromHTTPSubscription:inputStr proxyPort:proxyPort];
+            NSString* subscription = result[@"subscriptionURL"];
+            if (!result) {
+                result = [@{@"vmess": @[], @"vless": @[], @"other": @[]} mutableDeepCopy];
+                [ConfigImporter importShareLink:inputStr into:result];
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSUInteger serverCount = [result[@"vmess"] count] + [result[@"vless"] count];
+                if (subscription) {
+                    if (![self.subscriptions containsObject:subscription]) [self.subscriptions addObject:subscription];
+                    [self presentImportMessage:[NSString stringWithFormat:@"Added a subscription with %lu servers.", serverCount + [result[@"other"] count] + [result[@"configs"] count]]];
                     return;
                 }
-                NSMutableDictionary* ssOutbound = [ConfigImporter ssOutboundFromSSLink:inputStr];
-                if (ssOutbound) {
-                    [self.outbounds addObject:ssOutbound];
-                    [self presentImportResultOfVmessCount:0 otherCount:1 ruleSetCount:0];
-                } else {
-                    [self presentImportResultOfVmessCount:0 otherCount:0 ruleSetCount:0];
+                if ([inputStr.lowercaseString hasPrefix:@"http"]) {
+                    [self presentImportMessage:@"Could not load servers from this subscription URL."];
+                    return;
                 }
+                [self.profiles addObjectsFromArray:result[@"vmess"]];
+                [self.profiles addObjectsFromArray:result[@"vless"]];
+                [self.outbounds addObjectsFromArray:result[@"other"]];
+                [self presentImportResultOfVmessCount:serverCount otherCount:[result[@"other"] count] ruleSetCount:0];
             });
-        }
+        });
     }];
 }
 
 - (void)presentImportResultOfVmessCount:(NSInteger)vmessCount otherCount:(NSInteger)otherCount  ruleSetCount:(NSInteger)ruleSetCount {
+    [self presentImportMessage:[NSString stringWithFormat:@"Imported %lu servers and %lu other protocol outbounds, %lu routing rule sets.", vmessCount, otherCount, ruleSetCount]];
+}
+
+- (void)presentImportMessage:(NSString*)message {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self->_profileTable reloadData];
         self.popover = [[NSPopover alloc] init];
-        self.importMessageField.stringValue = [NSString stringWithFormat:@"Imported %lu vmess and %lu other protocol outbounds, %lu routing rule sets.", vmessCount, otherCount, ruleSetCount];
+        self.importMessageField.stringValue = message;
         self.popover.contentViewController = [[NSViewController alloc] init];
         self.popover.contentViewController.view = self.importResultView;
         self.popover.behavior = NSPopoverBehaviorTransient;
@@ -395,77 +411,11 @@
 
 }
 
-- (IBAction)importFromMiscLinks:(id)sender {
-    [self askInputWithPrompt:@"V2RayXS will try importing ssd://, vmess:// and http(s):// links from v2rayN and SSD(may cause failure)." handler:^(NSString *inputStr) {
-        inputStr = [inputStr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if ([inputStr length] != 0) {
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-                ServerProfile* p = [ConfigImporter importFromXrayShareLink:inputStr];
-                if (!p) {
-                    p = [ConfigImporter importFromVmessOfV2RayN:inputStr];
-                }
-                NSInteger vmessCount = 0;
-                NSInteger otherCount = 0;
-                if (p) {
-                    [self.profiles addObject:p];
-                    vmessCount = 1;
-                }
-                NSDictionary* ssdResult = [ConfigImporter importFromSubscriptionOfSSD:inputStr];
-                for (NSDictionary* d in ssdResult[@"other"]) {
-                    [self.outbounds addObject:[d mutableDeepCopy]];
-                    otherCount += 1;
-                }
-                NSMutableDictionary* p2 = [ConfigImporter importFromHTTPSubscription:inputStr];
-                if (p2) {
-                    [self.profiles addObjectsFromArray:p2[@"vmess"]];
-                    [self.profiles addObjectsFromArray:p2[@"vless"]];
-                    [self.outbounds addObjectsFromArray:p2[@"other"]];
-                    vmessCount += [p2[@"vmess"] count] + [p2[@"vless"] count];
-                    otherCount += [p2[@"other"] count];
-                }
-                [self presentImportResultOfVmessCount:vmessCount otherCount:otherCount ruleSetCount:0];
-            });
-        }
-    }];
-}
-
-
-- (IBAction)importFromVLESSLinks:(id)sender {
-    [self askInputWithPrompt:@"V2RayXS will try importing vless:// links. analysis support By @tzmax" handler:^(NSString *inputStr) {
-        inputStr = [inputStr stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if ([inputStr length] != 0) {
-            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-                ServerProfile* p = [ConfigImporter importFromVLESSOfXray:inputStr];
-                NSInteger vmessCount = 0;
-                NSInteger otherCount = 0;
-                if (p) {
-                    [self.profiles addObject:p];
-                    vmessCount = 1;
-                }
-                NSDictionary* ssdResult = [ConfigImporter importFromSubscriptionOfSSD:inputStr];
-                for (NSDictionary* d in ssdResult[@"other"]) {
-                    [self.outbounds addObject:[d mutableDeepCopy]];
-                    otherCount += 1;
-                }
-                NSMutableDictionary* p2 = [ConfigImporter importFromHTTPSubscription:inputStr];
-                if (p2) {
-                    [self.profiles addObjectsFromArray:p2[@"vmess"]];
-                    [self.profiles addObjectsFromArray:p2[@"vless"]];
-                    [self.outbounds addObjectsFromArray:p2[@"other"]];
-                    vmessCount += [p2[@"vmess"] count] + [p2[@"vless"] count];
-                    otherCount += [p2[@"other"] count];
-                }
-                [self presentImportResultOfVmessCount:vmessCount otherCount:otherCount ruleSetCount:0];
-            });
-        }
-    }];
-}
-
 - (IBAction)importFromJSONFiles:(id)sender {
     NSOpenPanel* openPanel = [NSOpenPanel openPanel];
     [openPanel setCanChooseFiles:YES];
     [openPanel setAllowsMultipleSelection:YES];
-    [openPanel setAllowedFileTypes:@[@"json"]];
+    openPanel.allowedContentTypes = @[UTTypeJSON];
     [openPanel setDirectoryURL:[[NSFileManager defaultManager] homeDirectoryForCurrentUser]];
 
     [openPanel beginSheetModalForWindow:[self window]  completionHandler:^(NSModalResponse result) {

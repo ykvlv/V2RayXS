@@ -74,6 +74,7 @@ NS_ASSUME_NONNULL_BEGIN
 // v2ray core
 @property (weak) IBOutlet NSTextField *corePathField;
 @property (weak) IBOutlet NSTextField *coreFileListField;
+@property (weak) IBOutlet NSTextField *geoDataStatusField;
 @property (weak) IBOutlet NSPopUpButton *enableRestoreButton;
 @property BOOL enableRestore;
 

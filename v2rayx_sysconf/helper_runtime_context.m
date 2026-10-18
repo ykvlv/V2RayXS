@@ -19,7 +19,7 @@ BOOL helperRuntimeLoadDefaultRouteBaseline(HelperRuntimeContext context, NSStrin
 }
 
 BOOL helperRuntimeInstallIPv4TakeoverRoutes(HelperRuntimeContext context, NSString* tunName, NSMutableDictionary* backup, NSString** errorMessage) {
-    return installIPv4TakeoverRoutes(tunName, context.routeHelper, context.activeIPv4TakeoverRoutes, backup, ^(NSMutableDictionary* stateBackup, NSString* state, NSString* lastError) {
+    return installIPv4TakeoverRoutes(tunName, *context.defaultRouteGatewayV4, *context.defaultRouteInterfaceV4, context.routeHelper, context.activeIPv4TakeoverRoutes, backup, ^(NSMutableDictionary* stateBackup, NSString* state, NSString* lastError) {
         context.updateRouteBackupStateBlock(stateBackup, state, lastError);
     }, errorMessage);
 }

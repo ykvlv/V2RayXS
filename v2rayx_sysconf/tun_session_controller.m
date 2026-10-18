@@ -4,6 +4,7 @@
 #import "tun_session_controller.h"
 
 static NSArray<NSString*>* const IPv4TakeoverCIDRs = @[@"0.0.0.0/1", @"128.0.0.0/1"];
+static NSArray<NSString*>* const IPv6RejectCIDRs = @[@"::/1", @"8000::/1"];
 
 static BOOL isTunManagedIPv4Route(NSString* gateway, NSString* interfaceName, NSString* activeTunName, NSString* tunWg);
 
@@ -45,6 +46,8 @@ BOOL loadDefaultRouteBaseline(SYSRouteHelper* routeHelper,
 }
 
 BOOL installIPv4TakeoverRoutes(NSString* tunName,
+                               NSString* gateway,
+                               NSString* physicalInterface,
                                SYSRouteHelper* routeHelper,
                                NSMutableArray<NSDictionary*>* __strong *activeIPv4TakeoverRoutes,
                                NSMutableDictionary* backup,
@@ -57,6 +60,17 @@ BOOL installIPv4TakeoverRoutes(NSString* tunName,
         return NO;
     }
     *activeIPv4TakeoverRoutes = [[NSMutableArray alloc] init];
+    if (![routeHelper setScopedDefaultRouteViaGateway:gateway interface:physicalInterface family:SYSRouteAddressFamilyIPv4]) {
+        if (errorMessage != NULL) {
+            *errorMessage = [NSString stringWithFormat:@"Failed to add the default route scoped to %@.", physicalInterface ?: @""];
+        }
+        if (backup != nil && updateRouteBackupStateBlock != nil) {
+            updateRouteBackupStateBlock(backup, ROUTE_BACKUP_STATE_SWITCHING, @"scoped default route install failed");
+        }
+        return NO;
+    }
+    [*activeIPv4TakeoverRoutes addObject:@{@"cidr": @"default", @"gateway": gateway, @"scope": physicalInterface, @"family": @"ipv4"}];
+    updateRouteBackupTakeoverRoutes(backup, *activeIPv4TakeoverRoutes);
     for (NSString* cidr in IPv4TakeoverCIDRs) {
         if (![routeHelper addNetworkRouteToDestination:cidr interface:tunName family:SYSRouteAddressFamilyIPv4]) {
             if (errorMessage != NULL) {
@@ -69,6 +83,30 @@ BOOL installIPv4TakeoverRoutes(NSString* tunName,
         }
         [*activeIPv4TakeoverRoutes addObject:@{@"cidr": cidr, @"interface": tunName, @"family": @"ipv4"}];
     }
+    // IPv6 does not go through the tun, so it is rejected and apps fall back to IPv4.
+    // The core's sockets bound to the interface keep IPv6 through a scoped default route.
+    NSDictionary* unscopedDefaultV6 = nil;
+    BOOL hasScopedDefaultV6 = NO;
+    for (NSDictionary* route in [routeHelper defaultRoutesForFamily:SYSRouteAddressFamilyIPv6]) {
+        if (![route[@"interface"] isEqual:physicalInterface]) continue;
+        if ([route[@"flags"] containsString:@"I"]) hasScopedDefaultV6 = YES;
+        else unscopedDefaultV6 = route;
+    }
+    if (unscopedDefaultV6 && !hasScopedDefaultV6 && [routeHelper setScopedDefaultRouteViaGateway:unscopedDefaultV6[@"gateway"] interface:physicalInterface family:SYSRouteAddressFamilyIPv6]) {
+        [*activeIPv4TakeoverRoutes addObject:@{@"cidr": @"default", @"gateway": unscopedDefaultV6[@"gateway"], @"scope": physicalInterface, @"family": @"ipv6"}];
+    }
+    for (NSString* cidr in IPv6RejectCIDRs) {
+        if (![routeHelper addRejectRouteToDestination:cidr family:SYSRouteAddressFamilyIPv6]) {
+            if (errorMessage != NULL) {
+                *errorMessage = [NSString stringWithFormat:@"Failed to install IPv6 reject route %@.", cidr];
+            }
+            if (backup != nil && updateRouteBackupStateBlock != nil) {
+                updateRouteBackupStateBlock(backup, ROUTE_BACKUP_STATE_SWITCHING, @"ipv6 reject install failed");
+            }
+            return NO;
+        }
+        [*activeIPv4TakeoverRoutes addObject:@{@"cidr": cidr, @"reject": @YES, @"family": @"ipv6"}];
+    }
     updateRouteBackupTakeoverRoutes(backup, *activeIPv4TakeoverRoutes);
     return YES;
 }
@@ -80,29 +118,32 @@ BOOL removeIPv4TakeoverRoutes(NSString* tunName,
                               NSDictionary* backup,
                               NSString** errorMessage) {
     BOOL ok = YES;
+    NSMutableArray* remaining = [NSMutableArray array];
     NSArray<NSDictionary*>* takeoverEntries = activeIPv4TakeoverRouteEntries(*activeIPv4TakeoverRoutes, backup);
     for (NSDictionary* entry in takeoverEntries) {
         NSString* cidr = entry[@"cidr"] ?: @"";
         NSString* entryInterface = entry[@"interface"] ?: tunName ?: @"";
+        SYSRouteAddressFamily family = [entry[@"family"] isEqual:@"ipv6"] ? SYSRouteAddressFamilyIPv6 : SYSRouteAddressFamilyIPv4;
         BOOL removed = NO;
-        if (entryInterface.length > 0) {
+        if ([entry[@"scope"] isKindOfClass:[NSString class]]) {
+            removed = [routeHelper deleteScopedDefaultRouteViaGateway:entry[@"gateway"] interface:entry[@"scope"] family:family];
+        } else if ([entry[@"reject"] boolValue]) {
+            removed = [routeHelper deleteRejectRouteToDestination:cidr family:family];
+        } else if (entryInterface.length > 0) {
             removed = [routeHelper deleteNetworkRouteToDestination:cidr interface:entryInterface family:SYSRouteAddressFamilyIPv4];
         } else {
             removed = YES;
         }
-        if (!removed && defaultRouteGatewayV4.length > 0) {
+        if (!removed && !entry[@"scope"] && family == SYSRouteAddressFamilyIPv4 && defaultRouteGatewayV4.length > 0) {
             removed = [routeHelper deleteNetworkRouteToDestination:cidr gateway:defaultRouteGatewayV4 family:SYSRouteAddressFamilyIPv4];
         }
         ok = removed && ok;
+        if (!removed) [remaining addObject:entry];
         if (!removed && errorMessage != NULL) {
             *errorMessage = [NSString stringWithFormat:@"Failed to remove IPv4 takeover route %@.", cidr];
         }
     }
-    if (*activeIPv4TakeoverRoutes == nil) {
-        *activeIPv4TakeoverRoutes = [[NSMutableArray alloc] init];
-    } else {
-        [*activeIPv4TakeoverRoutes removeAllObjects];
-    }
+    *activeIPv4TakeoverRoutes = remaining;
     return ok;
 }
 

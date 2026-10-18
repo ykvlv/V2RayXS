@@ -5,6 +5,7 @@
 //
 
 #import "ConfigImporter.h"
+#import "SubscriptionRouting.h"
 #import "utilities.h"
 #import "XrayShareLinkParser.h"
 
@@ -201,11 +202,10 @@
             continue;
         }
         aRule[@"type"] = @"field";
-        if (!aRule[@"outboundTag"] && !aRule[@"balancerTag"]) {
+        // Saved rule sets can still name a balancer; the app has none, so those rules go to the selected server.
+        [aRule removeObjectForKey:@"balancerTag"];
+        if (!aRule[@"outboundTag"]) {
             aRule[@"outboundTag"] = @"main";
-        }
-        if (aRule[@"outboundTag"] && aRule[@"balancerTag"]) {
-            [aRule removeObjectForKey:@"balancerTag"];
         }
     }
     for (NSMutableDictionary* aRule in ruleToRemove) {
@@ -292,7 +292,7 @@
     return result;
 }
 
-+ (NSMutableDictionary*)importFromHTTPSubscription: (NSString*)httpLink {
++ (NSMutableDictionary*)importFromHTTPSubscription:(NSString*)httpLink proxyPort:(NSUInteger)proxyPort {
     // decode base64String
     NSString *base64String = [self decodeBase64String:httpLink];
     if(base64String != nil && ![base64String isEqual: @""]) {
@@ -306,79 +306,90 @@
     if (![@"http" isEqualToString:[httpLink substringToIndex:4]]) {
         return nil;
     }
-    NSURL *url = [NSURL URLWithString:httpLink];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url
-                                                      cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                                  timeoutInterval:30];
-    NSString *appVer = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.6.2";
-    // Neutral UA on purpose: remnawave returns the base64 share-link list for it.
-    // Mimicking Happ/v2rayNG would make the panel return a JSON config this app can't parse.
-    [req setValue:[NSString stringWithFormat:@"V2RayXS/%@", appVer] forHTTPHeaderField:@"User-Agent"];
-    // x-hwid is what makes remnawave (HWID device limit) serve the real servers
-    // instead of the "device not supported" placeholder.
-    [req setValue:[ConfigImporter deviceHWID] forHTTPHeaderField:@"x-hwid"];
-    [req setValue:@"macOS" forHTTPHeaderField:@"x-device-os"];
-    [req setValue:[[NSProcessInfo processInfo] operatingSystemVersionString] forHTTPHeaderField:@"x-ver-os"];
-    [req setValue:@"Mac" forHTTPHeaderField:@"x-device-model"];
+    NSString *appVer = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    NSDictionary* headers = @{
+        // remnawave answers an unknown User-Agent with its default share-link list.
+        @"User-Agent": [NSString stringWithFormat:@"V2RayXS/%@", appVer],
+        // Without x-hwid, remnawave's HWID device limit answers 404.
+        @"x-hwid": [ConfigImporter deviceHWID],
+        @"x-device-os": @"macOS",
+        @"x-ver-os": [[NSProcessInfo processInfo] operatingSystemVersionString],
+        @"x-device-model": @"Mac",
+    };
 
-    __block NSString *urlStr = nil;
-    __block NSError *urlError = nil;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:req
-            completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
-        if (error) {
-            urlError = error;
-        } else {
-            urlStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSHTTPURLResponse* response;
+    NSData* data = [SubscriptionRouting download:httpLink headers:headers proxyPort:proxyPort response:&response error:nil];
+    NSString* urlStr = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    if (urlStr) {
+        result[@"subscriptionURL"] = httpLink;
+        NSString* (^text)(NSString*) = ^(NSString* header) {
+            NSString* value = [response valueForHTTPHeaderField:header];
+            return [value hasPrefix:@"base64:"] ? [ConfigImporter decodeBase64String:[value substringFromIndex:7]] : value;
+        };
+        NSString* title = text(@"profile-title");
+        if (title.length) result[@"title"] = title;
+        NSString* announce = text(@"announce");
+        if (announce.length) result[@"announce"] = announce;
+        double hours = [[response valueForHTTPHeaderField:@"profile-update-interval"] doubleValue];
+        result[@"interval"] = @(hours > 0 ? MAX(1, MIN(hours, 168)) * 3600 : 86400);
+        NSMutableArray* routingLinks = [NSMutableArray array];
+        for (NSString* header in @[@"autorouting", @"routing"]) {
+            NSString* value = [[response valueForHTTPHeaderField:header] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+            // The routing header may also carry a bare base64 profile or "off".
+            if ([header isEqual:@"routing"] && value.length && ![SubscriptionRouting isRoutingLink:value]) {
+                value = [value isEqual:@"off"] ? @"://routing/off" : [@"://routing/onadd/" stringByAppendingString:value];
+            }
+            if ([SubscriptionRouting isRoutingLink:value]) [routingLinks addObject:value];
         }
-        dispatch_semaphore_signal(sem);
-    }];
-    [task resume];
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    if (!urlError && urlStr) {
         NSString *decodedDataStr = [ConfigImporter decodeBase64String:urlStr];
         if ([decodedDataStr length] == 0) {
             decodedDataStr = urlStr;
         }
+        result[@"configs"] = [SubscriptionRouting serverConfigsFromJSON:urlStr];
         decodedDataStr = [decodedDataStr stringByReplacingOccurrencesOfString:@"\r" withString:@""];
-        NSArray *decodedDataArray = [decodedDataStr componentsSeparatedByString:@"\n"];
-        for (id linkStr in decodedDataArray) {
+        NSArray *decodedDataArray = [result[@"configs"] count] ? @[] : [decodedDataStr componentsSeparatedByString:@"\n"];
+        for (NSString* rawLink in decodedDataArray) {
+            NSString* linkStr = [rawLink stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
             if ([linkStr length] != 0) {
-                @try {
-                    ServerProfile* standard = [ConfigImporter importFromXrayShareLink:linkStr];
-                    if (standard) {
-                        if (standard.protocol == vless) {
-                            [result[@"vless"] addObject:standard];
-                        } else {
-                            [result[@"vmess"] addObject:standard];
-                        }
-                        continue;
-                    }
-                    ServerProfile* p = [ConfigImporter importFromVmessOfV2RayN:linkStr];
-                    if (p) {
-                        [result[@"vmess"] addObject:p];
-                        continue;
-                    }
-                    ServerProfile* l = [ConfigImporter importFromVLESSOfXray:linkStr];
-                    if (l) {
-                        [result[@"vless"] addObject:l];
-                        continue;
-                    }
-                    NSMutableDictionary* outbound = [ConfigImporter ssOutboundFromSSLink:linkStr];
-                    if (outbound) {
-                        [result[@"other"] addObject:outbound];
-                        continue;
-                    }
-                    NSMutableDictionary* ssdResults = [ConfigImporter importFromSubscriptionOfSSD:linkStr];
-                    [result[@"other"] addObjectsFromArray:ssdResults[@"other"]];
-                } @catch (NSException *exception) {
+                if ([SubscriptionRouting isRoutingLink:linkStr]) {
+                    [routingLinks addObject:linkStr];
                     continue;
                 }
+                [ConfigImporter importShareLink:linkStr into:result];
             }
+        }
+        if ([result[@"vmess"] count] + [result[@"vless"] count] + [result[@"other"] count] + [result[@"configs"] count] == 0) return nil;
+        // A remote profile is kept up to date by the provider, so it wins over an embedded one.
+        NSUInteger remote = [routingLinks indexOfObjectPassingTest:^BOOL(NSString* link, NSUInteger index, BOOL* stop) {
+            return [link containsString:@"://autorouting/"];
+        }];
+        NSString* routingLink = remote == NSNotFound ? routingLinks.firstObject : routingLinks[remote];
+        if (routingLink) {
+            NSError* error;
+            NSDictionary* profile = [SubscriptionRouting profileFromLink:routingLink proxyPort:proxyPort error:&error];
+            if (profile) result[@"profile"] = profile;
+            else result[@"profileError"] = error.localizedDescription;
         }
         return result;
     }
     return nil;
+}
+
++ (void)importShareLink:(NSString*)link into:(NSMutableDictionary*)result {
+    @try {
+        ServerProfile* profile = [ConfigImporter importFromXrayShareLink:link] ?: [ConfigImporter importFromVmessOfV2RayN:link] ?: [ConfigImporter importFromVLESSOfXray:link];
+        if (profile) {
+            [result[profile.protocol == vless ? @"vless" : @"vmess"] addObject:profile];
+            return;
+        }
+        NSMutableDictionary* outbound = [ConfigImporter ssOutboundFromSSLink:link];
+        if (outbound) {
+            [result[@"other"] addObject:outbound];
+            return;
+        }
+        [result[@"other"] addObjectsFromArray:[ConfigImporter importFromSubscriptionOfSSD:link][@"other"]];
+    } @catch (NSException *exception) {
+    }
 }
 
 + (ServerProfile*)importFromXrayShareLink:(NSString*)link {
@@ -711,7 +722,6 @@
                 count += 1;
             }
         }
-        NSLog(@"%@", result);
         return result;
     } @catch (NSException *exception) {
         return EMPTY_IMPORT_RESULT;
