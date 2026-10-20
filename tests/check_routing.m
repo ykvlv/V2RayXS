@@ -80,6 +80,21 @@ int main(int argc, const char* argv[]) {
         require([SubscriptionRouting validateConfig:runtime assets:assets core:core error:&error], error.localizedDescription ?: @"");
         runtime[@"inbounds"] = [SubscriptionRouting inboundsWithSocksPort:1081 httpPort:8001 listen:@"0.0.0.0" udp:NO tunName:nil fakeDNS:YES];
         require([SubscriptionRouting validateConfig:runtime assets:assets core:core error:&error], error.localizedDescription ?: @"");
+        require([runtime[@"inbounds"][0][@"sniffing"][@"routeOnly"] boolValue], @"FakeDNS keeps sniffed domains for routing only");
+
+        NSMutableDictionary* tun = [SubscriptionRouting runtimeConfigFromServerConfig:balanced];
+        [SubscriptionRouting useFakeDNS:tun];
+        [SubscriptionRouting useFakeDNS:tun];
+        require([tun[@"dns"][@"servers"] isEqual:@[@{@"address": @"fakedns", @"domains": @[@"regexp:.*"]}, @"1.1.1.1"]], @"FakeDNS answers apps, the config's resolver the core");
+        require([tun[@"dns"][@"queryStrategy"] isEqual:@"UseIPv4"], @"no fake IPv6 in tun mode");
+        require([tun[@"routing"][@"rules"][0][@"outboundTag"] isEqual:@"__v2rayxs_dns__"] && [tun[@"routing"][@"rules"] count] == 3, @"port 53 goes to the DNS outbound once");
+        require([[tun[@"outbounds"] valueForKey:@"protocol"] isEqual:@[@"vless", @"vless", @"freedom", @"blackhole", @"dns"]], @"the DNS outbound is added once, after the default one");
+        require([tun[@"outbounds"][2][@"streamSettings"][@"sockopt"][@"domainStrategy"] isEqual:@"ForceIPv4"], @"direct connections resolve through the core");
+        tun[@"inbounds"] = [SubscriptionRouting inboundsWithSocksPort:1081 httpPort:8001 listen:@"127.0.0.1" udp:YES tunName:nil fakeDNS:YES];
+        require([SubscriptionRouting validateConfig:tun assets:assets core:core error:&error], error.localizedDescription ?: @"");
+        NSMutableDictionary* system = [@{@"outbounds": @[proxy2], @"dns": @{@"servers": @[@"localhost"]}} mutableCopy];
+        [SubscriptionRouting useFakeDNS:system];
+        require([system[@"dns"][@"servers"][1] isEqual:@"https://1.1.1.1/dns-query"], @"the system resolver is replaced, it would answer from FakeDNS");
         puts("routing checks passed");
     }
     return 0;

@@ -230,8 +230,9 @@ static NSString* sha256(NSData* data) {
 }
 
 + (NSArray*)inboundsWithSocksPort:(NSInteger)socksPort httpPort:(NSInteger)httpPort listen:(NSString*)listen udp:(BOOL)udp tunName:(NSString*)tunName fakeDNS:(BOOL)fakeDNS {
-    // Tun traffic arrives by IP, so domain rules need the sniffed domain; FakeDNS also needs the real destination restored.
-    NSDictionary* sniffing = fakeDNS ? @{@"enabled": @YES, @"destOverride": @[@"http", @"tls", @"quic", @"fakedns"]} : @{@"enabled": @YES, @"destOverride": @[@"http", @"tls", @"quic"], @"routeOnly": @YES};
+    // Tun traffic arrives by IP, so domain rules need the sniffed domain. Xray restores the domain of a fake address even with routeOnly.
+    NSArray* protocols = fakeDNS ? @[@"http", @"tls", @"quic", @"fakedns"] : @[@"http", @"tls", @"quic"];
+    NSDictionary* sniffing = @{@"enabled": @YES, @"destOverride": protocols, @"routeOnly": @YES};
     NSMutableArray* inbounds = [NSMutableArray arrayWithObjects:
         @{@"tag": APP_INBOUND_TAGS[0], @"protocol": @"socks", @"listen": listen, @"port": @(socksPort), @"settings": @{@"auth": @"noauth", @"udp": [NSNumber numberWithBool:udp], @"ip": @"127.0.0.1"}, @"sniffing": sniffing},
         @{@"tag": APP_INBOUND_TAGS[1], @"protocol": @"http", @"listen": listen, @"port": @(httpPort), @"settings": @{@"timeout": @0}, @"sniffing": sniffing},
@@ -267,6 +268,54 @@ static NSString* sha256(NSData* data) {
         rule[@"inboundTag"] = mapped.array;
     }
     return fullConfig;
+}
+
++ (void)useFakeDNS:(NSMutableDictionary*)config {
+    NSMutableDictionary* dns = [config[@"dns"] isKindOfClass:NSDictionary.class] ? [config[@"dns"] mutableDeepCopy] : [NSMutableDictionary dictionary];
+    NSMutableArray* servers = [NSMutableArray arrayWithObject:@{@"address": @"fakedns", @"domains": @[@"regexp:.*"]}];
+    // The system resolver now answers from FakeDNS, so the core's own lookups need a resolver that does not go through it.
+    for (id server in [dns[@"servers"] isKindOfClass:NSArray.class] ? dns[@"servers"] : @[]) {
+        id address = [server isKindOfClass:NSDictionary.class] ? server[@"address"] : server;
+        if (![@[@"fakedns", @"localhost"] containsObject:address ?: @""]) [servers addObject:server];
+    }
+    if (servers.count == 1) [servers addObject:@"https://1.1.1.1/dns-query"];
+    dns[@"servers"] = servers;
+    // Tun mode rejects IPv6, so a fake AAAA answer would only delay the fallback to IPv4.
+    dns[@"queryStrategy"] = @"UseIPv4";
+    config[@"dns"] = dns;
+
+    NSMutableArray* outbounds = [NSMutableArray array];
+    NSString* dnsTag = nil;
+    for (id item in [config[@"outbounds"] isKindOfClass:NSArray.class] ? config[@"outbounds"] : @[]) {
+        NSMutableDictionary* outbound = [item isKindOfClass:NSDictionary.class] ? [item mutableDeepCopy] : nil;
+        if (!outbound) {
+            [outbounds addObject:item];
+            continue;
+        }
+        if (!dnsTag && [outbound[@"protocol"] isEqual:@"dns"] && [outbound[@"tag"] isKindOfClass:NSString.class]) dnsTag = outbound[@"tag"];
+        if ([outbound[@"protocol"] isEqual:@"freedom"]) {
+            NSMutableDictionary* stream = [outbound[@"streamSettings"] isKindOfClass:NSDictionary.class] ? outbound[@"streamSettings"] : [NSMutableDictionary dictionary];
+            NSMutableDictionary* socket = [stream[@"sockopt"] isKindOfClass:NSDictionary.class] ? stream[@"sockopt"] : [NSMutableDictionary dictionary];
+            // Resolving through the system would give a direct connection a fake address.
+            id strategy = socket[@"domainStrategy"];
+            if (![strategy isKindOfClass:NSString.class] || ![strategy length] || [strategy caseInsensitiveCompare:@"AsIs"] == NSOrderedSame) socket[@"domainStrategy"] = @"ForceIPv4";
+            stream[@"sockopt"] = socket;
+            outbound[@"streamSettings"] = stream;
+        }
+        [outbounds addObject:outbound];
+    }
+    if (!dnsTag) {
+        dnsTag = @"__v2rayxs_dns__";
+        [outbounds addObject:@{@"tag": dnsTag, @"protocol": @"dns"}];
+    }
+    config[@"outbounds"] = outbounds;
+
+    NSMutableDictionary* routing = [config[@"routing"] isKindOfClass:NSDictionary.class] ? [config[@"routing"] mutableDeepCopy] : [NSMutableDictionary dictionary];
+    NSMutableArray* rules = [routing[@"rules"] isKindOfClass:NSArray.class] ? routing[@"rules"] : [NSMutableArray array];
+    NSDictionary* dnsRule = @{@"type": @"field", @"inboundTag": APP_INBOUND_TAGS, @"port": @"53", @"outboundTag": dnsTag};
+    if (![rules containsObject:dnsRule]) [rules insertObject:dnsRule atIndex:0];
+    routing[@"rules"] = rules;
+    config[@"routing"] = routing;
 }
 
 + (BOOL)validateRules:(NSArray*)rules dns:(NSDictionary*)dns assets:(NSString*)assets core:(NSString*)core error:(NSError**)error {

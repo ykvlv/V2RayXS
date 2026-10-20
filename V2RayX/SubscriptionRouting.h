@@ -22,6 +22,8 @@ int ipAddressBits(NSString* address);
 + (NSArray*)inboundsWithSocksPort:(NSInteger)socksPort httpPort:(NSInteger)httpPort listen:(NSString*)listen udp:(BOOL)udp tunName:(NSString*)tunName fakeDNS:(BOOL)fakeDNS;
 // A full config keeps its outbounds, routing, DNS and observatory.
 + (NSMutableDictionary*)runtimeConfigFromServerConfig:(NSDictionary*)config;
+// Tun mode: apps get fake addresses, so every connection carries its domain to the proxy without relying on sniffing.
++ (void)useFakeDNS:(NSMutableDictionary*)config;
 // Asks Xray whether the config loads with the geodata in assets.
 + (BOOL)validateConfig:(NSDictionary*)config assets:(NSString*)assets core:(NSString*)core error:(NSError**)error;
 // Asks Xray whether the rules and DNS load with the geodata in assets.

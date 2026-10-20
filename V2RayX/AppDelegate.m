@@ -2804,6 +2804,7 @@ static int normalizedExitCodeFromWaitStatus(int status) {
                            @"loglevel": logLevel
                            };
     fullConfig[@"dns"] = fullConfig[@"dns"] ?: @{@"servers": dnsString.length ? [dnsString componentsSeparatedByString:@","] : @[@"localhost"]};
+    if (proxyMode == tunMode) [SubscriptionRouting useFakeDNS:fullConfig];
     NSString* tunName = nil;
     if ([self isUsingXrayTunMode]) {
         tunName = [self currentTunInterfaceName];

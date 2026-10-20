@@ -30,7 +30,8 @@ Code: [SubscriptionRouting.m](V2RayX/SubscriptionRouting.m), [AppDelegate.m](V2R
 ## TUN mode
 
 - The core's connections are bound to the physical interface instead of routing server addresses around the tunnel, so a shared address such as Cloudflare's cannot carry other sites past the proxy. Only a custom JSON config still gets host routes for its servers.
-- A new network (interface or gateway) rebuilds the TUN setup. Domain rules work through sniffing.
+- A new network (interface or gateway) rebuilds the TUN setup.
+- The core answers the system's DNS queries with FakeDNS, as Incy's Internal DNS does, so a connection to a name reaches the proxy as that name. Sniffing alone gives up after 200 ms without data, and the proxy then routes the connection by its shared IP. The core resolves for itself through the config's resolvers, `https://1.1.1.1/dns-query` in place of `localhost`, and direct connections resolve through the core. A connection to a literal IP still depends on sniffing.
 - IPv6 does not go through the tunnel, so TUN mode rejects it (`::/1` and `8000::/1`) and apps fall back to IPv4.
 - While TUN is on, the helper points the system resolver at public resolvers through the tunnel, as a VPN's DNS settings would, and keeps the network's resolvers for the servers' domains. It restores them when TUN stops, including what a crashed helper left behind.
 - Another VPN that sends all names to its own DNS server takes precedence over these resolvers. Limit that VPN's DNS to its own domains in its client.
